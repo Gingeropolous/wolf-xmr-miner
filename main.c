@@ -8,13 +8,22 @@
 #include <jansson.h>
 #include <sys/time.h>
 #include <stdatomic.h>
+
+#ifdef __linux__
+
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sched.h>
-#include <fcntl.h>
+
+#else
+
+#include <winsock2.h>
+
+#endif
+
 #include <CL/cl.h>
 
 #include "cryptonight.h"
@@ -50,7 +59,7 @@ typedef struct _WorkerInfo
 
 typedef struct _PoolInfo
 {
-	int sockfd;
+	SOCKET sockfd;
 	char *PoolName;
 	WorkerInfo WorkerData;
 	uint32_t MinerThreadCount;
@@ -995,9 +1004,7 @@ void *StratumThreadProc(void *InfoPtr)
 	CurrentJob.Initialized = false;
 	PartialMessageOffset = 0;
 	
-	// Set socket to non-blocking mode
-	int iof = fcntl(poolsocket, F_GETFL, 0);
-	fcntl(poolsocket, F_SETFL, iof | O_NONBLOCK);
+	SetNonBlockingSocket(Pool->sockfd);
 	
 	// Listen for work until termination.
 	for(;;)
@@ -1044,7 +1051,7 @@ void *StratumThreadProc(void *InfoPtr)
 			if(!msg)
 			{
 				Log(LOG_CRITICAL, "Error parsing JSON from pool server.");
-				close(poolsocket);
+				closesocket(poolsocket);
 				return(NULL);
 			}
 			
@@ -1148,7 +1155,7 @@ void *StratumThreadProc(void *InfoPtr)
 				{
 					Log(LOG_CRITICAL, "Server message has no id field and doesn't seem to have a method field...");
 					json_decref(msg);
-					close(poolsocket);
+					closesocket(poolsocket);
 					return(NULL);
 				}
 				
@@ -1642,6 +1649,14 @@ int main(int argc, char **argv)
 	
 	Log(LOG_DEBUG, "Parsed pool URL: %s", StrippedPoolURL);
 	
+	ret = NetworkingInit();
+	
+	if(ret)
+	{
+		Log(LOG_CRITICAL, "Failed to initialize networking with error code %d.", ret);
+		return(0);
+	}
+	
 	// TODO: Have ConnectToPool() return a Pool struct
 	poolsocket = ConnectToPool(StrippedPoolURL, TmpPort);
 	
@@ -1849,7 +1864,9 @@ int main(int argc, char **argv)
 	
 	//pthread_cancel(BroadcastThread);
 	
-	close(poolsocket);
+	closesocket(poolsocket);
+	
+	NetworkingShutdown();
 	
 	printf("Stratum thread terminated.\n");
 	

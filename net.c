@@ -1,11 +1,38 @@
 #include <string.h>
+
+#ifdef __linux__
+
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
+#include <fcntl.h>
+
+#else
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+#endif
 
 #include "minerlog.h"
+#include "minernet.h"
 
-#define INVALID_SOCKET	-1
+int NetworkingInit(void)
+{
+	#ifdef __linux__
+	return(0);
+	#else
+	WSADATA data;
+	return(WSAStartup(MAKEWORD(2, 0), &data));
+	#endif
+}
+
+void NetworkingShutdown(void)
+{
+	#ifndef __linux__
+	WSACleanup();
+	#endif
+}
 
 int ConnectToPool(char *URL, char *Port)
 {
@@ -52,4 +79,23 @@ int ConnectToPool(char *URL, char *Port)
 	
 	freeaddrinfo(poolinfo);
 	return(sockfd);
+}
+
+int SetNonBlockingSocket(SOCKET sockfd)
+{
+	// Set socket to non-blocking mode
+	
+	#ifdef __linux__
+	
+	int iof = fcntl(sockfd, F_GETFL, 0);
+	fcntl(sockfd, F_SETFL, iof | O_NONBLOCK);
+	
+	#else
+	
+	unsigned long int enable = 1;
+	ioctlsocket(sockfd, FIONBIO, &enable);
+	
+	#endif
+	
+	return(0);
 }

@@ -6,7 +6,6 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <jansson.h>
-#include <sys/time.h>
 #include <stdatomic.h>
 
 #ifdef __linux__
@@ -1249,7 +1248,7 @@ void *MinerThreadProc(void *Info)
 	
 	while(!ExitFlag)
 	{
-		struct timespec begin, end;
+		TIME_TYPE begin, end;
 		
 		atomic_store(RestartMining + MTInfo->ThreadID, false);
 		
@@ -1280,7 +1279,8 @@ void *MinerThreadProc(void *Info)
 		
 		PrevNonce = MTInfo->AlgoCtx.Nonce;
 		
-		clock_gettime(CLOCK_REALTIME, &begin);
+		//clock_gettime(CLOCK_REALTIME, &begin);
+		begin = MinerGetCurTime();
 		
 		do
 		{
@@ -1306,17 +1306,18 @@ void *MinerThreadProc(void *Info)
 			}
 		} while(MTInfo->AlgoCtx.Nonce < (PrevNonce + 1024));
 		
-		clock_gettime(CLOCK_REALTIME, &end);
+		//clock_gettime(CLOCK_REALTIME, &end);
+		end = MinerGetCurTime();
 		
-		double NanosecondsElapsed = 1e9 * (double)(end.tv_sec - begin.tv_sec) + (double)(end.tv_nsec - begin.tv_nsec);
-		double SecondsElapsed = NanosecondsElapsed * 1e-9;
+		//double NanosecondsElapsed = 1e9 * (double)(end.tv_sec - begin.tv_sec) + (double)(end.tv_nsec - begin.tv_nsec);
+		double Seconds = SecondsElapsed(begin, end);
 		
 		pthread_mutex_lock(&StatusMutex);
 		GlobalStatus.ThreadHashCounts[MTInfo->ThreadID] = MTInfo->AlgoCtx.Nonce - PrevNonce;
-		GlobalStatus.ThreadTimes[MTInfo->ThreadID] = SecondsElapsed;
+		GlobalStatus.ThreadTimes[MTInfo->ThreadID] = Seconds;
 		pthread_mutex_unlock(&StatusMutex);
 		
-		Log(LOG_INFO, "Thread %d: %.02fH/s\n", MTInfo->ThreadID, ((MTInfo->AlgoCtx.Nonce - PrevNonce)) / (SecondsElapsed));
+		Log(LOG_INFO, "Thread %d: %.02fH/s\n", MTInfo->ThreadID, ((MTInfo->AlgoCtx.Nonce - PrevNonce)) / (Seconds));
 	}
 	
 	free(JobID);
@@ -1601,7 +1602,6 @@ int main(int argc, char **argv)
 	AlgoSettings Settings;
 	MinerThreadInfo *MThrInfo;
 	OCLPlatform PlatformContext;
-	struct sigaction ExitHandler;
 	int ret, poolsocket, PlatformIdx = 0;
 	pthread_t Stratum, ADLThread, BroadcastThread, *MinerWorker;
 	
@@ -1618,10 +1618,15 @@ int main(int argc, char **argv)
 	MThrInfo = (MinerThreadInfo *)malloc(sizeof(MinerThreadInfo) * Settings.TotalThreads);
 	MinerWorker = (pthread_t *)malloc(sizeof(pthread_t) * Settings.TotalThreads);
 	
+	#ifdef __linux__
+	
+	struct sigaction ExitHandler;
 	memset(&ExitHandler, 0, sizeof(struct sigaction));
 	ExitHandler.sa_handler = SigHandler;
 	
 	sigaction(SIGINT, &ExitHandler, NULL);
+	
+	#endif
 	
 	RestartMining = (atomic_bool *)malloc(sizeof(atomic_bool) * Settings.TotalThreads);
 	

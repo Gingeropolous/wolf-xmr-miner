@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdbool.h>
+#include "minerutils.h"
 
 // Parameter len is bytes in rawstr, therefore, asciistr must have
 // at least (len << 1) + 1 bytes allocated, the last for the NULL
@@ -105,3 +106,32 @@ void CreateTargetFromDiff(uint32_t *FullTarget, double Diff)
 		FullTarget[i + 1] = (uint32_t)(tmp >> 32);
 	}
 }
+
+#ifdef __linux__
+
+TIME_TYPE MinerGetCurTime(void)
+{
+	TIME_TYPE CurTime;
+	clock_gettime(CLOCK_REALTIME, &CurTime);
+	return(CurTime);
+}
+
+double SecondsElapsed(TIME_TYPE Start, TIME_TYPE End)
+{
+	double NanosecondsElapsed = 1e9 * (double)(End.tv_sec - Start.tv_sec) + (double)(End.tv_nsec - Start.tv_nsec);
+	return(NanosecondsElapsed * 1e-9);
+}
+
+#else
+
+TIME_TYPE MinerGetCurTime(void)
+{
+	return(clock());
+}
+
+double SecondsElapsed(TIME_TYPE Start, TIME_TYPE End)
+{
+	return((double)(End - Start) / CLOCKS_PER_SEC);
+}
+
+#endif

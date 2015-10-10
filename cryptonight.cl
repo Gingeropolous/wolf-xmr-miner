@@ -292,9 +292,9 @@ __kernel void cn1(__global uint4 *Scratchpad, __global ulong *states)
 		
 		((uint4 *)c)[0] = Scratchpad[(a[0] & 0x1FFFF0) >> 4];
 		((uint4 *)c)[0] = AES_Round(AES0, AES1, AES2, AES3, ((uint4 *)c)[0], ((uint4 *)a)[0]);
-		b_x ^= ((uint4 *)c)[0];
+		//b_x ^= ((uint4 *)c)[0];
 		
-		Scratchpad[(a[0] & 0x1FFFF0) >> 4] = b_x;
+		Scratchpad[(a[0] & 0x1FFFF0) >> 4] = b_x ^ ((uint4 *)c)[0];
 		
 		uint4 tmp;
 		tmp = Scratchpad[(c[0] & 0x1FFFF0) >> 4];
@@ -340,12 +340,12 @@ __kernel void cn2(__global uint4 *Scratchpad, __global ulong *states, __global u
 	
 	for(int i = 0; i < (1 << 17); i += 8)
 	{
-		//#pragma unroll 1
+		#pragma unroll
 		for(int x = 0; x < 8; ++x)
 		{
 			text[x] ^= Scratchpad[i + x];
 			
-			//#pragma unroll
+			#pragma unroll 1
 			for(int j = 0; j < 10; ++j)
 				text[x] = AES_Round(AES0, AES1, AES2, AES3, text[x], ((uint4 *)ExpandedKey2)[j]);
 		}

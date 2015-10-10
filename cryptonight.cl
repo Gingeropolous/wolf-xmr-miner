@@ -101,7 +101,7 @@ static const __constant uint keccakf_piln[24] =
 
 void keccakf1600(ulong *st)
 {
-    int i, j, round;
+    int i, round;
     ulong t, bc[5];
 	
 	#pragma unroll
@@ -192,7 +192,7 @@ void AESExpandKey256(uint *keybuf)
 __kernel void cn0(__global ulong *input, __global uint4 *Scratchpad, __global ulong *states)
 {
 	uchar State[200];
-	uchar ExpandedKey1[256];
+	uint ExpandedKey1[256];
 	__local uint AES0[256], AES1[256], AES2[256], AES3[256];
 	ulong inbuf[10];
 	uint4 text[8];
@@ -315,7 +315,8 @@ __kernel void cn1(__global uint4 *Scratchpad, __global ulong *states)
 __kernel void cn2(__global uint4 *Scratchpad, __global ulong *states, __global uint *Branch0, __global uint *Branch1, __global uint *Branch2, __global uint *Branch3, ulong ThreadCount)
 {
 	uint4 text[8];
-	uchar State[200], ExpandedKey2[256];
+	uchar State[200];
+	uint ExpandedKey2[256];
 	__local uint AES0[256], AES1[256], AES2[256], AES3[256];
 	
 	Scratchpad += ((1 << 17) * (get_global_id(0) - get_global_offset(0)));

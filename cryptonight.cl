@@ -1,3 +1,6 @@
+#pragma OPENCL EXTENSION cl_amd_media_ops2 : enable
+
+
 #include "wolf-aes.cl"
 #include "wolf-skein.cl"
 #include "jh.cl"
@@ -38,7 +41,7 @@ static const __constant uchar sbox[256] =
 	0x8C, 0xA1, 0x89, 0x0D, 0xBF, 0xE6, 0x42, 0x68, 0x41, 0x99, 0x2D, 0x0F, 0xB0, 0x54, 0xBB, 0x16
 };
 
-/*
+
 void keccakf1600(ulong *s)
 {
     for(int i = 0; i < 24; ++i) 
@@ -85,7 +88,7 @@ void keccakf1600(ulong *s)
         tmp1 = s[20]; tmp2 = s[21]; s[20] = bitselect(s[20] ^ s[22], s[20], s[21]); s[21] = bitselect(s[21] ^ s[23], s[21], s[22]); s[22] = bitselect(s[22] ^ s[24], s[22], s[23]); s[23] = bitselect(s[23] ^ tmp1, s[23], s[24]); s[24] = bitselect(s[24] ^ tmp2, s[24], tmp1);
         s[0] ^= keccakf_rndc[i];
     }
-}*/
+}
 
 static const __constant uint keccakf_rotc[24] = 
 {
@@ -99,12 +102,12 @@ static const __constant uint keccakf_piln[24] =
     15, 23, 19, 13, 12, 2, 20, 14, 22, 9,  6,  1 
 };
 
-void keccakf1600(ulong *st)
+void keccakf1600_1(ulong *st)
 {
     int i, round;
     ulong t, bc[5];
 	
-	#pragma unroll
+	#pragma unroll 1
     for(round = 0; round < 24; ++round)
     {
 
@@ -114,7 +117,8 @@ void keccakf1600(ulong *st)
         bc[2] = st[2] ^ st[7] ^ st[12] ^ st[17] ^ st[22];
         bc[3] = st[3] ^ st[8] ^ st[13] ^ st[18] ^ st[23];
         bc[4] = st[4] ^ st[9] ^ st[14] ^ st[19] ^ st[24];
-
+		
+		#pragma unroll 1
         for (i = 0; i < 5; ++i) {
             t = bc[(i + 4) % 5] ^ rotate(bc[(i + 1) % 5], 1UL);
             st[i     ] ^= t;
@@ -133,11 +137,152 @@ void keccakf1600(ulong *st)
             t = bc[0];
         }
 
-        ulong tmp1 = st[0]; ulong tmp2 = st[1]; st[0] = bitselect(st[0] ^ st[2], st[0], st[1]); st[1] = bitselect(st[1] ^ st[3], st[1], st[2]); st[2] = bitselect(st[2] ^ st[4], st[2], st[3]); st[3] = bitselect(st[3] ^ tmp1, st[3], st[4]); st[4] = bitselect(st[4] ^ tmp2, st[4], tmp1);
-        tmp1 = st[5]; tmp2 = st[6]; st[5] = bitselect(st[5] ^ st[7], st[5], st[6]); st[6] = bitselect(st[6] ^ st[8], st[6], st[7]); st[7] = bitselect(st[7] ^ st[9], st[7], st[8]); st[8] = bitselect(st[8] ^ tmp1, st[8], st[9]); st[9] = bitselect(st[9] ^ tmp2, st[9], tmp1);
-        tmp1 = st[10]; tmp2 = st[11]; st[10] = bitselect(st[10] ^ st[12], st[10], st[11]); st[11] = bitselect(st[11] ^ st[13], st[11], st[12]); st[12] = bitselect(st[12] ^ st[14], st[12], st[13]); st[13] = bitselect(st[13] ^ tmp1, st[13], st[14]); st[14] = bitselect(st[14] ^ tmp2, st[14], tmp1);
-        tmp1 = st[15]; tmp2 = st[16]; st[15] = bitselect(st[15] ^ st[17], st[15], st[16]); st[16] = bitselect(st[16] ^ st[18], st[16], st[17]); st[17] = bitselect(st[17] ^ st[19], st[17], st[18]); st[18] = bitselect(st[18] ^ tmp1, st[18], st[19]); st[19] = bitselect(st[19] ^ tmp2, st[19], tmp1);
-        tmp1 = st[20]; tmp2 = st[21]; st[20] = bitselect(st[20] ^ st[22], st[20], st[21]); st[21] = bitselect(st[21] ^ st[23], st[21], st[22]); st[22] = bitselect(st[22] ^ st[24], st[22], st[23]); st[23] = bitselect(st[23] ^ tmp1, st[23], st[24]); st[24] = bitselect(st[24] ^ tmp2, st[24], tmp1);
+        //ulong tmp1 = st[0]; ulong tmp2 = st[1]; st[0] = bitselect(st[0] ^ st[2], st[0], st[1]); st[1] = bitselect(st[1] ^ st[3], st[1], st[2]); st[2] = bitselect(st[2] ^ st[4], st[2], st[3]); st[3] = bitselect(st[3] ^ tmp1, st[3], st[4]); st[4] = bitselect(st[4] ^ tmp2, st[4], tmp1);
+        //tmp1 = st[5]; tmp2 = st[6]; st[5] = bitselect(st[5] ^ st[7], st[5], st[6]); st[6] = bitselect(st[6] ^ st[8], st[6], st[7]); st[7] = bitselect(st[7] ^ st[9], st[7], st[8]); st[8] = bitselect(st[8] ^ tmp1, st[8], st[9]); st[9] = bitselect(st[9] ^ tmp2, st[9], tmp1);
+        //tmp1 = st[10]; tmp2 = st[11]; st[10] = bitselect(st[10] ^ st[12], st[10], st[11]); st[11] = bitselect(st[11] ^ st[13], st[11], st[12]); st[12] = bitselect(st[12] ^ st[14], st[12], st[13]); st[13] = bitselect(st[13] ^ tmp1, st[13], st[14]); st[14] = bitselect(st[14] ^ tmp2, st[14], tmp1);
+        //tmp1 = st[15]; tmp2 = st[16]; st[15] = bitselect(st[15] ^ st[17], st[15], st[16]); st[16] = bitselect(st[16] ^ st[18], st[16], st[17]); st[17] = bitselect(st[17] ^ st[19], st[17], st[18]); st[18] = bitselect(st[18] ^ tmp1, st[18], st[19]); st[19] = bitselect(st[19] ^ tmp2, st[19], tmp1);
+        //tmp1 = st[20]; tmp2 = st[21]; st[20] = bitselect(st[20] ^ st[22], st[20], st[21]); st[21] = bitselect(st[21] ^ st[23], st[21], st[22]); st[22] = bitselect(st[22] ^ st[24], st[22], st[23]); st[23] = bitselect(st[23] ^ tmp1, st[23], st[24]); st[24] = bitselect(st[24] ^ tmp2, st[24], tmp1);
+        
+        #pragma unroll 1
+        for(int i = 0; i < 25; i += 5)
+        {	
+			ulong tmp[5];
+			
+			#pragma unroll 1
+			for(int x = 0; x < 5; ++x)
+				tmp[x] = bitselect(st[i + x] ^ st[i + ((x + 2) % 5)], st[i + x], st[i + ((x + 1) % 5)]);
+			
+			#pragma unroll 1
+			for(int x = 0; x < 5; ++x) st[i + x] = tmp[x];
+        }
+        
+        //  Iota
+        st[0] ^= keccakf_rndc[round];
+    }
+}
+
+void keccakf1600_2(ulong *st)
+{
+    int i, round;
+    ulong t, bc[5];
+	
+	#pragma unroll 1
+    for(round = 0; round < 24; ++round)
+    {
+
+        // Theta
+        //bc[0] = st[0] ^ st[5] ^ st[10] ^ st[15] ^ st[20];
+        //bc[1] = st[1] ^ st[6] ^ st[11] ^ st[16] ^ st[21];
+        //bc[2] = st[2] ^ st[7] ^ st[12] ^ st[17] ^ st[22];
+        //bc[3] = st[3] ^ st[8] ^ st[13] ^ st[18] ^ st[23];
+        //bc[4] = st[4] ^ st[9] ^ st[14] ^ st[19] ^ st[24];
+		
+		/*
+		#pragma unroll
+        for (i = 0; i < 5; ++i) {
+            t = bc[(i + 4) % 5] ^ rotate(bc[(i + 1) % 5], 1UL);
+            st[i     ] ^= t;
+            st[i +  5] ^= t;
+            st[i + 10] ^= t;
+            st[i + 15] ^= t;
+            st[i + 20] ^= t;
+        }
+		*/
+		
+		bc[0] = st[0] ^ st[5] ^ st[10] ^ st[15] ^ st[20] ^ rotate(st[2] ^ st[7] ^ st[12] ^ st[17] ^ st[22], 1UL);
+		bc[1] = st[1] ^ st[6] ^ st[11] ^ st[16] ^ st[21] ^ rotate(st[3] ^ st[8] ^ st[13] ^ st[18] ^ st[23], 1UL);
+		bc[2] = st[2] ^ st[7] ^ st[12] ^ st[17] ^ st[22] ^ rotate(st[4] ^ st[9] ^ st[14] ^ st[19] ^ st[24], 1UL);
+		bc[3] = st[3] ^ st[8] ^ st[13] ^ st[18] ^ st[23] ^ rotate(st[0] ^ st[5] ^ st[10] ^ st[15] ^ st[20], 1UL);
+		bc[4] = st[4] ^ st[9] ^ st[14] ^ st[19] ^ st[24] ^ rotate(st[1] ^ st[6] ^ st[11] ^ st[16] ^ st[21], 1UL);
+		
+		st[0] ^= bc[4];
+		st[5] ^= bc[4];
+		st[10] ^= bc[4];
+		st[15] ^= bc[4];
+		st[20] ^= bc[4];
+		
+		st[1] ^= bc[0];
+		st[6] ^= bc[0];
+		st[11] ^= bc[0];
+		st[16] ^= bc[0];
+		st[21] ^= bc[0];
+		
+		st[2] ^= bc[1];
+		st[7] ^= bc[1];
+		st[12] ^= bc[1];
+		st[17] ^= bc[1];
+		st[22] ^= bc[1];
+		
+		st[3] ^= bc[2];
+		st[8] ^= bc[2];
+		st[13] ^= bc[2];
+		st[18] ^= bc[2];
+		st[23] ^= bc[2];
+		
+		st[4] ^= bc[3];
+		st[9] ^= bc[3];
+		st[14] ^= bc[3];
+		st[19] ^= bc[3];
+		st[24] ^= bc[3];
+		
+        // Rho Pi
+        t = st[1];
+        #pragma unroll
+        for (i = 0; i < 24; ++i) {
+            bc[0] = st[keccakf_piln[i]];
+            st[keccakf_piln[i]] = rotate(t, (ulong)keccakf_rotc[i]);
+            t = bc[0];
+        }
+		
+		
+		/*
+		ulong tmp1 = st[1] ^ bc[0];
+        
+        st[0] ^= bc[4];
+        st[1] = rotate(st[6] ^ bc[0], 44UL);
+        st[6] = rotate(st[9] ^ bc[3], 20UL);
+        st[9] = rotate(st[22] ^ bc[1], 61UL);
+        st[22] = rotate(st[14] ^ bc[3], 39UL);
+        st[14] = rotate(st[20] ^ bc[4], 18UL);
+        st[20] = rotate(st[2] ^ bc[1], 62UL);
+        st[2] = rotate(st[12] ^ bc[1], 43UL);
+        st[12] = rotate(st[13] ^ bc[2], 25UL);
+        st[13] = rotate(st[19] ^ bc[3], 8UL);
+        st[19] = rotate(st[23] ^ bc[2], 56UL);
+        st[23] = rotate(st[15] ^ bc[4], 41UL);
+        st[15] = rotate(st[4] ^ bc[3], 27UL);
+        st[4] = rotate(st[24] ^ bc[3], 14UL);
+        st[24] = rotate(st[21] ^ bc[0], 2UL);
+        st[21] = rotate(st[8] ^ bc[2], 55UL);
+        st[8] = rotate(st[16] ^ bc[0], 35UL);
+        st[16] = rotate(st[5] ^ bc[4], 36UL);
+        st[5] = rotate(st[3] ^ bc[2], 28UL);
+        st[3] = rotate(st[18] ^ bc[2], 21UL);
+        st[18] = rotate(st[17] ^ bc[1], 15UL);
+        st[17] = rotate(st[11] ^ bc[0], 10UL);
+        st[11] = rotate(st[7] ^ bc[1], 6UL);
+        st[7] = rotate(st[10] ^ bc[4], 3UL);
+        st[10] = rotate(tmp1, 1UL);
+		*/
+		
+		
+        //ulong tmp1 = st[0]; ulong tmp2 = st[1]; st[0] = bitselect(st[0] ^ st[2], st[0], st[1]); st[1] = bitselect(st[1] ^ st[3], st[1], st[2]); st[2] = bitselect(st[2] ^ st[4], st[2], st[3]); st[3] = bitselect(st[3] ^ tmp1, st[3], st[4]); st[4] = bitselect(st[4] ^ tmp2, st[4], tmp1);
+        //tmp1 = st[5]; tmp2 = st[6]; st[5] = bitselect(st[5] ^ st[7], st[5], st[6]); st[6] = bitselect(st[6] ^ st[8], st[6], st[7]); st[7] = bitselect(st[7] ^ st[9], st[7], st[8]); st[8] = bitselect(st[8] ^ tmp1, st[8], st[9]); st[9] = bitselect(st[9] ^ tmp2, st[9], tmp1);
+        //tmp1 = st[10]; tmp2 = st[11]; st[10] = bitselect(st[10] ^ st[12], st[10], st[11]); st[11] = bitselect(st[11] ^ st[13], st[11], st[12]); st[12] = bitselect(st[12] ^ st[14], st[12], st[13]); st[13] = bitselect(st[13] ^ tmp1, st[13], st[14]); st[14] = bitselect(st[14] ^ tmp2, st[14], tmp1);
+        //tmp1 = st[15]; tmp2 = st[16]; st[15] = bitselect(st[15] ^ st[17], st[15], st[16]); st[16] = bitselect(st[16] ^ st[18], st[16], st[17]); st[17] = bitselect(st[17] ^ st[19], st[17], st[18]); st[18] = bitselect(st[18] ^ tmp1, st[18], st[19]); st[19] = bitselect(st[19] ^ tmp2, st[19], tmp1);
+        //tmp1 = st[20]; tmp2 = st[21]; st[20] = bitselect(st[20] ^ st[22], st[20], st[21]); st[21] = bitselect(st[21] ^ st[23], st[21], st[22]); st[22] = bitselect(st[22] ^ st[24], st[22], st[23]); st[23] = bitselect(st[23] ^ tmp1, st[23], st[24]); st[24] = bitselect(st[24] ^ tmp2, st[24], tmp1);
+        
+        #pragma unroll
+        for(int i = 0; i < 25; i += 5)
+        {
+			ulong tmp1 = st[i], tmp2 = st[i + 1];
+			
+			st[i] = bitselect(st[i] ^ st[i + 2], st[i], st[i + 1]);
+			st[i + 1] = bitselect(st[i + 1] ^ st[i + 3], st[i + 1], st[i + 2]);
+			st[i + 2] = bitselect(st[i + 2] ^ st[i + 4], st[i + 2], st[i + 3]);
+			st[i + 3] = bitselect(st[i + 3] ^ tmp1, st[i + 3], st[i + 4]);
+			st[i + 4] = bitselect(st[i + 4] ^ tmp2, st[i + 4], tmp1);
+        }
         
         //  Iota
         st[0] ^= keccakf_rndc[round];
@@ -161,7 +306,7 @@ void CNKeccak(ulong *output, ulong *input)
 	// Last bit of padding
 	st[16] = 0x8000000000000000UL;
 	
-	keccakf1600(st);
+	keccakf1600_1(st);
 	
 	for(int i = 0; i < 25; ++i) output[i] = st[i];
 }
@@ -176,7 +321,7 @@ static const __constant uchar rcon[8] = { 0x8d, 0x01, 0x02, 0x04, 0x08, 0x10, 0x
 
 void AESExpandKey256(uint *keybuf)
 {
-	#pragma unroll 4
+	//#pragma unroll 4
 	for(uint c = 8, i = 1; c < 60; ++c)
 	{
 		// For 256-bit keys, an sbox permutation is done every other 4th uint generated, AND every 8th
@@ -189,18 +334,19 @@ void AESExpandKey256(uint *keybuf)
 	}
 }
 
+__attribute__((reqd_work_group_size(WORKSIZE, 1, 1)))
 __kernel void cn0(__global ulong *input, __global uint4 *Scratchpad, __global ulong *states)
 {
-	uchar State[200];
+	ulong State[25];
 	uint ExpandedKey1[256];
 	__local uint AES0[256], AES1[256], AES2[256], AES3[256];
 	ulong inbuf[10];
 	uint4 text[8];
 	
 	states += (25 * (get_global_id(0) - get_global_offset(0)));
-	Scratchpad += ((1 << 17) * (get_global_id(0) - get_global_offset(0)));
+	Scratchpad += ((get_global_id(0) - get_global_offset(0)) << 17);
 	
-	for(int i = 0; i < 256; ++i)
+	for(int i = get_local_id(0); i < 256; i += WORKSIZE)
 	{
 		const uint tmp = AES0_C[i];
 		AES0[i] = tmp;
@@ -214,25 +360,25 @@ __kernel void cn0(__global ulong *input, __global uint4 *Scratchpad, __global ul
 	inbuf[9] = (ulong)((__global uint *)input)[18];
 	
 	((uint *)(((uchar *)inbuf) + 39))[0] = get_global_id(0);
-	CNKeccak((ulong *)State, inbuf);
+	CNKeccak(State, inbuf);
 	
 	#pragma unroll
-	for(int i = 0; i < 25; ++i) states[i] = ((ulong *)State)[i];
+	for(int i = 0; i < 25; ++i) states[i] = State[i];
 	
 	#pragma unroll
 	for(uint i = 0; i < 8; ++i) text[i] = vload4(i + 4, (uint *)(State));
 	
 	#pragma unroll
-	for(int i = 0; i < 4; ++i) ((ulong *)ExpandedKey1)[i] = ((ulong *)State)[i];
+	for(int i = 0; i < 4; ++i) ((ulong *)ExpandedKey1)[i] = State[i];
 	
 	AESExpandKey256(ExpandedKey1);
 	
 	mem_fence(CLK_LOCAL_MEM_FENCE);
 	
 	#pragma unroll 1
-	for(int i = 0; i < (1 << 17); i += 8)
+	for(int i = 0; i < 0x4000; ++i)
 	{
-		#if defined(__Hawaii__) || defined(__Tonga__) || defined(__Fiji__)
+		#if defined(__Hawaii__) || defined(__Tonga__) //|| defined(__Fiji__)
 		#pragma unroll
 		for(int j = 0; j < 10; ++j)
 		{
@@ -241,17 +387,19 @@ __kernel void cn0(__global ulong *input, __global uint4 *Scratchpad, __global ul
 				text[x] = AES_Round(AES0, AES1, AES2, AES3, text[x], ((uint4 *)ExpandedKey1)[j]);
 		}
 		
-		for(int j = 0; j < 8; ++j) *(Scratchpad + i + j) = text[j];
+		#pragma unroll
+		for(int j = 0; j < 8; ++j) *(Scratchpad + (i << 3) + j) = text[j];
 		
 		#else
 		
 		#pragma unroll
 		for(int x = 0; x < 8; ++x)
 		{
+			#pragma unroll 1
 			for(int j = 0; j < 10; ++j)
 				text[x] = AES_Round(AES0, AES1, AES2, AES3, text[x], ((uint4 *)ExpandedKey1)[j]);
 			
-			*(Scratchpad + i + x) = text[x];
+			*(Scratchpad + (i << 3) + x) = text[x];
 		}
 		
 		#endif
@@ -260,6 +408,7 @@ __kernel void cn0(__global ulong *input, __global uint4 *Scratchpad, __global ul
 	mem_fence(CLK_GLOBAL_MEM_FENCE);
 }
 
+__attribute__((reqd_work_group_size(WORKSIZE, 1, 1)))
 __kernel void cn1(__global uint4 *Scratchpad, __global ulong *states)
 {
 	ulong a[2], b[2];
@@ -268,7 +417,7 @@ __kernel void cn1(__global uint4 *Scratchpad, __global ulong *states)
 	Scratchpad += ((1 << 17) * (get_global_id(0) - get_global_offset(0)));
 	states += (25 * (get_global_id(0) - get_global_offset(0)));
 	
-	for(int i = 0; i < 256; ++i)
+	for(int i = get_local_id(0); i < 256; i += WORKSIZE)
 	{
 		const uint tmp = AES0_C[i];
 		AES0[i] = tmp;
@@ -286,6 +435,7 @@ __kernel void cn1(__global uint4 *Scratchpad, __global ulong *states)
 	
 	mem_fence(CLK_LOCAL_MEM_FENCE);
 	
+	#pragma unroll 8
 	for(int i = 0; i < 0x80000; ++i)
 	{
 		ulong c[2];
@@ -312,17 +462,18 @@ __kernel void cn1(__global uint4 *Scratchpad, __global ulong *states)
 	mem_fence(CLK_GLOBAL_MEM_FENCE);
 }
 
+__attribute__((reqd_work_group_size(WORKSIZE, 1, 1)))
 __kernel void cn2(__global uint4 *Scratchpad, __global ulong *states, __global uint *Branch0, __global uint *Branch1, __global uint *Branch2, __global uint *Branch3, ulong ThreadCount)
 {
 	uint4 text[8];
-	uchar State[200];
+	ulong State[25];
 	uint ExpandedKey2[256];
 	__local uint AES0[256], AES1[256], AES2[256], AES3[256];
 	
-	Scratchpad += ((1 << 17) * (get_global_id(0) - get_global_offset(0)));
+	Scratchpad += ((get_global_id(0) - get_global_offset(0)) << 17);
 	states += (25 * (get_global_id(0) - get_global_offset(0)));
 	
-	for(int i = 0; i < 256; ++i)
+	for(int i = get_local_id(0); i < 256; i += WORKSIZE)
 	{
 		const uint tmp = AES0_C[i];
 		AES0[i] = tmp;
@@ -331,19 +482,29 @@ __kernel void cn2(__global uint4 *Scratchpad, __global ulong *states, __global u
 		AES3[i] = rotate(tmp, 24U);
 	}
 	
-	for(int i = 0; i < 25; ++i) ((ulong *)State)[i] = states[i];
+	for(int i = 0; i < 25; ++i) State[i] = states[i];
 	
-	for(int i = 0; i < 4; ++i) ((ulong *)ExpandedKey2)[i] = ((ulong *)State)[i + 4];
-	for(uint i = 0; i < 8; ++i) text[i] = vload4(i + 4, (uint *)State);
+	#if defined(__Tahiti__) || defined(__Pitcairn__)
+	
+	for(int i = 0; i < 4; ++i) ((ulong *)ExpandedKey2)[i] = State[i + 4];
+	for(int i = 0; i < 8; ++i) text[i] = vload4(i + 4, (uint *)State);
+	
+	#else
+	
+	for(int i = 0; i < 8; ++i) ((ulong2 *)text)[i] = vload2(i + 4, State);
+	((uint8 *)ExpandedKey2)[0] = vload8(1, (uint *)State);
+	
+	#endif
 	
 	AESExpandKey256(ExpandedKey2);
 	
-	for(int i = 0; i < (1 << 17); i += 8)
+	#pragma unroll 1
+	for(int i = 0; i < 0x4000; ++i)
 	{
 		#pragma unroll
 		for(int x = 0; x < 8; ++x)
 		{
-			text[x] ^= Scratchpad[i + x];
+			text[x] ^= Scratchpad[(i << 3) + x];
 			
 			#pragma unroll 1
 			for(int j = 0; j < 10; ++j)
@@ -351,11 +512,11 @@ __kernel void cn2(__global uint4 *Scratchpad, __global ulong *states, __global u
 		}
 	}
 	
-	for(uint i = 0; i < 8; ++i) vstore4(text[i], i + 4, (uint *)State);
+	for(uint i = 0; i < 8; ++i) vstore2(((ulong2 *)text)[i], i + 4, State);
 	
-	keccakf1600((ulong *)State);
+	keccakf1600_2(State);
 		
-	for(int i = 0; i < 25; ++i) states[i] = ((ulong *)State)[i];
+	for(int i = 0; i < 25; ++i) states[i] = State[i];
 	
 	switch(State[0] & 3)
 	{

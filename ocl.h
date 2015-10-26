@@ -66,6 +66,7 @@ typedef struct _AlgoContext
 	cl_kernel *Kernels;
 	size_t GlobalSize;
 	size_t WorkSize;
+	size_t *GPUIdxs;
 	void *ExtraData;
 	size_t Nonce;
 } AlgoContext;

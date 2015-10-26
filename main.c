@@ -60,6 +60,8 @@ typedef struct _PoolInfo
 {
 	SOCKET sockfd;
 	char *PoolName;
+	char *StrippedURL;
+	char *Port;
 	WorkerInfo WorkerData;
 	uint32_t MinerThreadCount;
 	uint32_t *MinerThreads;
@@ -769,8 +771,18 @@ void *StratumThreadProc(void *InfoPtr)
 		
 		if(!FD_ISSET(poolsocket, &readfds))
 		{
-			Log(LOG_ERROR, "Stratum connection to pool timed out.");
-			return(NULL);
+			Log(LOG_NOTIFY, "Stratum connection to pool timed out.");
+			closesocket(poolsocket);
+			poolsocket = Pool->sockfd = ConnectToPool(Pool->StrippedURL, Pool->Port);
+			
+			// TODO/FIXME: This exit is bad and should be replaced with better flow control
+			if(poolsocket == INVALID_SOCKET)
+			{
+				Log(LOG_ERROR, "Unable to reconnect to pool. We be fucked.");
+				exit(0);			
+			}
+			
+			Log(LOG_NOTIFY, "Reconnected to pool.");
 		}
 		
 		// receive
@@ -1423,6 +1435,8 @@ int main(int argc, char **argv)
 	CurrentQueue.first = CurrentQueue.last = NULL;
 	
 	Pool.sockfd = poolsocket;
+	Pool.StrippedURL = strdup(StrippedPoolURL);
+	Pool.Port = strdup(TmpPort);
 	Pool.WorkerData = Settings.Workers[0];
 	Pool.MinerThreadCount = Settings.TotalThreads;
 	Pool.MinerThreads = (uint32_t *)malloc(sizeof(uint32_t) * Pool.MinerThreadCount);
@@ -1597,9 +1611,9 @@ int main(int argc, char **argv)
 	
 	while(!ExitFlag) sleep(1);
 	
-	//pthread_join(MinerWorker[0], NULL);
+	//pthread_join(Stratum, NULL);
 	
-	pthread_cancel(Stratum);
+	//pthread_cancel(Stratum);
 	//pthread_cancel(ADLThread);
 	
 	for(int i = 0; i < Settings.TotalThreads; ++i) pthread_cancel(MinerWorker[i]);

@@ -782,7 +782,51 @@ void *StratumThreadProc(void *InfoPtr)
 				exit(0);			
 			}
 			
+			Log(LOG_NOTIFY, "Reconnected to pool... authenticating...");
+			
+			requestobj = json_object();
+			loginobj = json_object();
+			
+			json_object_set_new(loginobj, "login", json_string(Pool->WorkerData.User));
+			json_object_set_new(loginobj, "pass", json_string(Pool->WorkerData.Pass));
+			json_object_set_new(loginobj, "agent", json_string("wolf-xmr-miner/0.1"));
+			
+			// Current XMR pools are a hack job and make us hardcode an id of 1
+			json_object_set_new(requestobj, "method", json_string("login"));
+			json_object_set_new(requestobj, "params", loginobj);
+			json_object_set_new(requestobj, "id", json_integer(1));
+			
+			temp = json_dumps(requestobj, JSON_PRESERVE_ORDER);
+			Log(LOG_NETDEBUG, "Request: %s\n", temp);
+			
+			// TODO/FIXME: Check for super unlikely error here
+			rawloginrequest = malloc(strlen(temp) + 16);
+			strcpy(rawloginrequest, temp);
+			
+			// No longer needed
+			json_decref(requestobj);
+			
+			// Add the very important Stratum newline
+			strcat(rawloginrequest, "\n");
+			
+			bytes = 0;
+				
+			// Send the shit - but send() might not get it all out in one go.
+			do
+			{
+				ret = send(Pool->sockfd, rawloginrequest + bytes, strlen(rawloginrequest) - bytes, 0);
+				if(ret == -1) return(NULL);
+				
+				bytes += ret;
+			} while(bytes < strlen(rawloginrequest));
+			
+			free(rawloginrequest);
+			
+			CurrentJob.Initialized = false;
+			PartialMessageOffset = 0;
+			
 			Log(LOG_NOTIFY, "Reconnected to pool.");
+			
 		}
 		
 		// receive

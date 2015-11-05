@@ -135,3 +135,15 @@ double SecondsElapsed(TIME_TYPE Start, TIME_TYPE End)
 }
 
 #endif
+
+#ifdef __linux__
+
+void Sleep(uint32_t ms)
+{
+	struct timespec t;
+	t.tv_sec = ms / 1000;
+	t.tv_nsec = (ms % 1000) * 1000000;
+	nanosleep(&t, NULL);
+}
+
+#endif

@@ -131,7 +131,7 @@ void *PoolBroadcastThreadProc(void *Info)
 	for(;;)
 	{
 		// TODO/FIXME: Use nanosleep().
-		while(pthread_mutex_trylock(&QueueMutex)) sleep(1);
+		while(pthread_mutex_trylock(&QueueMutex)) Sleep(1);
 		for(Share *CurShare = RemoveShare(&CurrentQueue); CurShare; CurShare = RemoveShare(&CurrentQueue))
 		{
 			uint32_t ShareNonce, ShareTime, ShareExtranonce2;

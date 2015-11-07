@@ -2,7 +2,6 @@
 #include <stdint.h>
 #include <string.h>
 #include <signal.h>
-#include <unistd.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <jansson.h>
@@ -10,6 +9,7 @@
 
 #ifdef __linux__
 
+#include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>

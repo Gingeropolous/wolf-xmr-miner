@@ -130,7 +130,6 @@ void *PoolBroadcastThreadProc(void *Info)
 	
 	for(;;)
 	{
-		// TODO/FIXME: Use nanosleep().
 		while(pthread_mutex_trylock(&QueueMutex)) Sleep(1);
 		for(Share *CurShare = RemoveShare(&CurrentQueue); CurShare; CurShare = RemoveShare(&CurrentQueue))
 		{
@@ -1125,7 +1124,9 @@ void *MinerThreadProc(void *Info)
 	
 	return(NULL);
 }
-	
+
+#ifdef __linux__
+
 void SigHandler(int signal)
 {
 	pthread_mutex_lock(&Mutex);
@@ -1134,6 +1135,21 @@ void SigHandler(int signal)
 	
 	pthread_mutex_unlock(&Mutex);
 }
+
+#else
+
+BOOL SigHandler(DWORD signal)
+{
+	pthread_mutex_lock(&Mutex);
+	
+	ExitFlag = true;
+	
+	pthread_mutex_unlock(&Mutex);
+	
+	return(TRUE);
+}
+
+#endif
 
 // Signed types indicate there is no default value
 // If they are negative, do not set them.
@@ -1397,6 +1413,7 @@ void FreeSettings(AlgoSettings *Settings)
 // that the connection may be cleanly closed.
 
 // TODO: Get Platform index from somewhere else
+// TODO/FIXME: Check functions called for error.
 int main(int argc, char **argv)
 {
 	PoolInfo Pool;
@@ -1426,6 +1443,10 @@ int main(int argc, char **argv)
 	ExitHandler.sa_handler = SigHandler;
 	
 	sigaction(SIGINT, &ExitHandler, NULL);
+	
+	#else
+	
+	SetConsoleCtrlHandler((PHANDLER_ROUTINE)SigHandler, TRUE);
 	
 	#endif
 	

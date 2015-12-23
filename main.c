@@ -394,7 +394,19 @@ int32_t RunXMRTest(AlgoContext *HashData, void *HashOutput)
 	
 	clFinish(*HashData->CommandQueues);
 	
-	for(int i = 0; i < 3; ++i)
+	size_t Nonce[2] = {HashData->Nonce, 1}, gthreads[2] = { GlobalThreads, 8 }, lthreads[2] = { LocalThreads, 8 };
+	
+	{
+		retval = clEnqueueNDRangeKernel(*HashData->CommandQueues, HashData->Kernels[0], 2, Nonce, gthreads, lthreads, 0, NULL, NULL);
+		
+		if(retval != CL_SUCCESS)
+		{
+			Log(LOG_CRITICAL, "Error %d when calling clEnqueueNDRangeKernel for kernel %d.", retval, 0);
+			return(ERR_OCL_API);
+		}
+	}
+	
+	/*for(int i = 1; i < 3; ++i)
 	{
 		retval = clEnqueueNDRangeKernel(*HashData->CommandQueues, HashData->Kernels[i], 1, &HashData->Nonce, &GlobalThreads, &LocalThreads, 0, NULL, NULL);
 	
@@ -403,6 +415,22 @@ int32_t RunXMRTest(AlgoContext *HashData, void *HashOutput)
 			Log(LOG_CRITICAL, "Error %d when calling clEnqueueNDRangeKernel for kernel %d.", retval, i);
 			return(ERR_OCL_API);
 		}
+	}*/
+	
+	retval = clEnqueueNDRangeKernel(*HashData->CommandQueues, HashData->Kernels[1], 1, &HashData->Nonce, &GlobalThreads, &LocalThreads, 0, NULL, NULL);
+	
+	if(retval != CL_SUCCESS)
+	{
+		Log(LOG_CRITICAL, "Error %d when calling clEnqueueNDRangeKernel for kernel %d.", retval, 1);
+		return(ERR_OCL_API);
+	}
+	
+	retval = clEnqueueNDRangeKernel(*HashData->CommandQueues, HashData->Kernels[2], 1, &HashData->Nonce, &GlobalThreads, &LocalThreads, 0, NULL, NULL);
+	
+	if(retval != CL_SUCCESS)
+	{
+		Log(LOG_CRITICAL, "Error %d when calling clEnqueueNDRangeKernel for kernel %d.", retval, 2);
+		return(ERR_OCL_API);
 	}
 	
 	retval = clEnqueueReadBuffer(*HashData->CommandQueues, HashData->ExtraBuffers[2], CL_FALSE, sizeof(cl_uint) * GlobalThreads, sizeof(cl_uint), BranchNonces, 0, NULL, NULL);

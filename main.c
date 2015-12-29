@@ -111,6 +111,7 @@ void FreeShare(Share *share)
 
 ShareQueue CurrentQueue;
 pthread_mutex_t QueueMutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t QueueCond = PTHREAD_COND_INITIALIZER;
 
 typedef struct _PoolBroadcastInfo
 {
@@ -144,10 +145,11 @@ void *PoolBroadcastThreadProc(void *Info)
 	CurrentQueue.first = CurrentQueue.last = NULL;
 	pthread_mutex_unlock(&QueueMutex);
 	void *c_ctx = cryptonight_ctx();
-	
+
+	pthread_mutex_lock(&QueueMutex);
 	for(;;)
 	{
-		while(pthread_mutex_trylock(&QueueMutex)) Sleep(1);
+		pthread_cond_wait(&QueueCond, &QueueMutex);
 		for(Share *CurShare = RemoveShare(&CurrentQueue); CurShare; CurShare = RemoveShare(&CurrentQueue))
 		{
 			uint32_t ShareNonce, ShareTime, ShareExtranonce2;
@@ -196,8 +198,8 @@ void *PoolBroadcastThreadProc(void *Info)
 			
 			FreeShare(CurShare);			
 		}
-		pthread_mutex_unlock(&QueueMutex);
 	}
+	pthread_mutex_unlock(&QueueMutex);
 	free(c_ctx);
 	return(NULL);
 }
@@ -1105,6 +1107,7 @@ void *MinerThreadProc(void *Info)
 				
 				pthread_mutex_lock(&QueueMutex);
 				SubmitShare(&CurrentQueue, NewShare);
+				pthread_cond_signal(&QueueCond);
 				pthread_mutex_unlock(&QueueMutex);				
 			}
 		} while(MTInfo->AlgoCtx.Nonce < (PrevNonce + 1024));

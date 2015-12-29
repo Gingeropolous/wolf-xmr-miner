@@ -18,7 +18,7 @@ typedef struct _JobInfo
 	bool DiffIsOutdated;
 	uint8_t *NetworkDiff;
 	uint8_t *Time;
-	uint8_t *XMRBlob;
+	uint8_t XMRBlob[76];
 	uint32_t XMRTarget;
 	uint8_t ENonce2Bytes;
 	uint32_t CurrentENonce2;

@@ -127,6 +127,7 @@ void *PoolBroadcastThreadProc(void *Info)
 	pthread_mutex_lock(&QueueMutex);
 	CurrentQueue.first = CurrentQueue.last = NULL;
 	pthread_mutex_unlock(&QueueMutex);
+	void *c_ctx = cryptonight_ctx();
 	
 	for(;;)
 	{
@@ -153,7 +154,7 @@ void *PoolBroadcastThreadProc(void *Info)
 			ASCIIHexToBinary(HashInput, CurrentJob.XMRBlob, 76 * 2);
 			pthread_mutex_unlock(&JobMutex);
 			((uint32_t *)(HashInput + 39))[0] = ShareNonce;
-			cryptonight_hash(HashResult, HashInput, 76);
+			cryptonight_hash_ctx(HashResult, HashInput, c_ctx);
 			BinaryToASCIIHex(ASCIIResult, HashResult, 32);
 			
 			json_object_set_new(params, "result", json_string(ASCIIResult));
@@ -195,6 +196,7 @@ void *PoolBroadcastThreadProc(void *Info)
 		}
 		pthread_mutex_unlock(&QueueMutex);
 	}
+	free(c_ctx);
 	return(NULL);
 }
 

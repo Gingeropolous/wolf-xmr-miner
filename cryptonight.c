@@ -75,7 +75,15 @@ static inline size_t e2i(const uint8_t* a) {
 }
 
 static inline void mul_sum_xor_dst(const uint8_t* a, uint8_t* c, uint8_t* dst) {
-	uint64_t hi, lo = mul128(((uint64_t*) a)[0], ((uint64_t*) dst)[0], &hi) + ((uint64_t*) c)[1];
+	uint64_t hi, lo;
+#ifdef __amd64
+	__asm__("mul %%rdx":
+	"=a" (lo), "=d" (hi):
+	"a" (*(uint64_t *)a), "d" (*(uint64_t *)dst));
+#else
+	lo = mul128(((uint64_t*) a)[0], ((uint64_t*) dst)[0], &hi);
+#endif
+	lo += ((uint64_t*) c)[1];
 	hi += ((uint64_t*) c)[0];
 
 	((uint64_t*) c)[0] = ((uint64_t*) dst)[0] ^ hi;
@@ -112,10 +120,11 @@ struct cryptonight_ctx {
 	oaes_ctx* aes_ctx;
 };
 
-void cryptonight_hash_ctx(void* output, const void* input, size_t len, struct cryptonight_ctx* ctx) {
-	keccak1600(input, len, (uint8_t *)&ctx->state.hs);
-	ctx->aes_ctx = (oaes_ctx*) oaes_alloc();
+void cryptonight_hash_ctx(void* output, const void* input, struct cryptonight_ctx* ctx) {
 	size_t i, j;
+	keccak1600(input, 76, (uint8_t *)&ctx->state.hs);
+	if (!ctx->aes_ctx)
+		ctx->aes_ctx = (oaes_ctx*) oaes_alloc();
 	memcpy(ctx->text, ctx->state.init, INIT_SIZE_BYTE);
 	
 	oaes_key_import_data(ctx->aes_ctx, ctx->state.hs.b, AES_KEY_SIZE);
@@ -182,8 +191,14 @@ void cryptonight_hash_ctx(void* output, const void* input, size_t len, struct cr
 	oaes_free((OAES_CTX **) &ctx->aes_ctx);
 }
 
+#if 0
 void cryptonight_hash(void* output, const void* input, size_t len) {
 	struct cryptonight_ctx *ctx = (struct cryptonight_ctx*)malloc(sizeof(struct cryptonight_ctx));
 	cryptonight_hash_ctx(output, input, len, ctx);
 	free(ctx);
+}
+#endif
+
+struct cryptonight_ctx* cryptonight_ctx(){
+	return calloc(1, sizeof(struct cryptonight_ctx));
 }

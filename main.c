@@ -80,6 +80,8 @@ JobInfo CurrentJob;
 typedef struct _Share
 {
 	uint32_t Nonce;
+	uint8_t Blob[76];
+	char *ID;
 	struct _Share *next;
 } Share;
 
@@ -164,15 +166,12 @@ void *PoolBroadcastThreadProc(void *Info)
 			msg = json_object();
 			params = json_object();
 			
-			pthread_mutex_lock(&JobMutex);
 			json_object_set_new(params, "id", json_string(pbinfo->XMRAuthID));
-			json_object_set_new(params, "job_id", json_string(CurrentJob.ID));
+			json_object_set_new(params, "job_id", json_string(CurShare->ID));
 			json_object_set_new(params, "nonce", json_string(ASCIINonce));
 			
-			ASCIIHexToBinary(HashInput, CurrentJob.XMRBlob, 76 * 2);
-			pthread_mutex_unlock(&JobMutex);
-			((uint32_t *)(HashInput + 39))[0] = ShareNonce;
-			cryptonight_hash_ctx(HashResult, HashInput, c_ctx);
+			((uint32_t *)(CurShare->Blob + 39))[0] = ShareNonce;
+			cryptonight_hash_ctx(HashResult, CurShare->Blob, c_ctx);
 			BinaryToASCIIHex(ASCIIResult, HashResult, 32);
 			
 			json_object_set_new(params, "result", json_string(ASCIIResult));
@@ -1100,10 +1099,13 @@ void *MinerThreadProc(void *Info)
 			{
 				Log(LOG_DEBUG, "Thread %d, GPU ID %d, GPU Type: %s: SHARE found (nonce 0x%.8X)!", MTInfo->ThreadID, *MTInfo->AlgoCtx.GPUIdxs, MTInfo->PlatformContext->Devices[*MTInfo->AlgoCtx.GPUIdxs].DeviceName, Results[i]);
 				
-				Share *NewShare = (Share *)malloc(sizeof(Share));
+				Share *NewShare = (Share *)malloc(sizeof(Share)+strlen(JobID)+1);
 				
 				NewShare->Nonce = Results[i];
+				memcpy(NewShare->Blob, TmpWork, sizeof(NewShare->Blob));
 				NewShare->next = NULL;
+				NewShare->ID = (char *)(NewShare+1);
+				strcpy(NewShare->ID, JobID);
 				
 				pthread_mutex_lock(&QueueMutex);
 				SubmitShare(&CurrentQueue, NewShare);

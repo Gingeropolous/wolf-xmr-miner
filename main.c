@@ -314,14 +314,6 @@ int32_t XMRSetKernelArgs(AlgoContext *HashData, void *HashInput, uint32_t Target
 		return(ERR_OCL_API);
 	}
 	
-	retval = clSetKernelArg(HashData->Kernels[2], 6, sizeof(cl_ulong), &GlobalThreads);
-	
-	if(retval != CL_SUCCESS)
-	{
-		Log(LOG_CRITICAL, "Error %d when calling clSetKernelArg for kernel %d, argument %d.", retval, 2, 6);
-		return(ERR_OCL_API);
-	}
-	
 	for(int i = 0; i < 4; ++i)
 	{
 		// States
@@ -425,7 +417,7 @@ int32_t RunXMRTest(AlgoContext *HashData, void *HashOutput)
 		return(ERR_OCL_API);
 	}
 	
-	retval = clEnqueueNDRangeKernel(*HashData->CommandQueues, HashData->Kernels[2], 1, &HashData->Nonce, &GlobalThreads, &LocalThreads, 0, NULL, NULL);
+	retval = clEnqueueNDRangeKernel(*HashData->CommandQueues, HashData->Kernels[2], 2, Nonce, gthreads, lthreads, 0, NULL, NULL);
 	
 	if(retval != CL_SUCCESS)
 	{

@@ -343,7 +343,7 @@ __kernel void cn0(__global ulong *input, __global uint4 *Scratchpad, __global ul
 	uint ExpandedKey1[256];
 	__local uint AES0[256], AES1[256], AES2[256], AES3[256];
 	ulong inbuf[10];
-	uint4 text[8];
+	uint4 text;
 	
 	states += (25 * (get_global_id(0) - get_global_offset(0)));
 	Scratchpad += ((get_global_id(0) - get_global_offset(0)));
@@ -367,8 +367,7 @@ __kernel void cn0(__global ulong *input, __global uint4 *Scratchpad, __global ul
 	#pragma unroll
 	for(int i = 0; i < 25; ++i) states[i] = State[i];
 	
-	#pragma unroll
-	for(uint i = 0; i < 8; ++i) text[i] = vload4(i + 4, (uint *)(State));
+	text = vload4(get_local_id(1) + 4, (uint *)(State));
 	
 	#pragma unroll
 	for(int i = 0; i < 4; ++i) ((ulong *)ExpandedKey1)[i] = State[i];
@@ -377,48 +376,16 @@ __kernel void cn0(__global ulong *input, __global uint4 *Scratchpad, __global ul
 	
 	mem_fence(CLK_LOCAL_MEM_FENCE);
 	
-	/*#pragma unroll 1
-	for(int i = 0; i < 0x4000; ++i)
-	{
-		#if defined(__Hawaii__) || defined(__Tonga__) //|| defined(__Fiji__)
-		#pragma unroll
-		for(int j = 0; j < 10; ++j)
-		{
-			#pragma unroll
-			for(int x = 0; x < 8; ++x)
-				text[x] = AES_Round(AES0, AES1, AES2, AES3, text[x], ((uint4 *)ExpandedKey1)[j]);
-		}
-		
-		#pragma unroll
-		for(int j = 0; j < 8; ++j) Scratchpad[IDX((i << 3) + j)] = text[j]; //*(Scratchpad + (i << 3) + j) = text[j];
-		
-		#else
-		
-		#pragma unroll
-		for(int x = 0; x < 8; ++x)
-		{
-			#pragma unroll 1
-			for(int j = 0; j < 10; ++j)
-				text[x] = AES_Round(AES0, AES1, AES2, AES3, text[x], ((uint4 *)ExpandedKey1)[j]);
-			
-			Scratchpad[IDX((i << 3) + x)] = text[x];
-		}
-		
-		#endif
-	}*/
-	
-	#pragma unroll 1
+	#pragma unroll 2
 	for(int i = 0; i < 0x4000; ++i)
 	{
 		#pragma unroll
 		for(int j = 0; j < 10; ++j)
-		{
-			text[get_local_id(1)] = AES_Round(AES0, AES1, AES2, AES3, text[get_local_id(1)], ((uint4 *)ExpandedKey1)[j]);
-		}
+			text = AES_Round(AES0, AES1, AES2, AES3, text, ((uint4 *)ExpandedKey1)[j]);
 		
-		Scratchpad[IDX((i << 3) + get_local_id(1))] = text[get_local_id(1)];
-		
+		Scratchpad[IDX((i << 3) + get_local_id(1))] = text;
 	}
+	
 	mem_fence(CLK_GLOBAL_MEM_FENCE);
 }
 
@@ -476,13 +443,13 @@ __kernel void cn1(__global uint4 *Scratchpad, __global ulong *states)
 	mem_fence(CLK_GLOBAL_MEM_FENCE);
 }
 
-__attribute__((reqd_work_group_size(WORKSIZE, 1, 1)))
-__kernel void cn2(__global uint4 *Scratchpad, __global ulong *states, __global uint *Branch0, __global uint *Branch1, __global uint *Branch2, __global uint *Branch3, ulong ThreadCount)
+__attribute__((reqd_work_group_size(WORKSIZE, 8, 1)))
+__kernel void cn2(__global uint4 *Scratchpad, __global ulong *states, __global uint *Branch0, __global uint *Branch1, __global uint *Branch2, __global uint *Branch3)
 {
-	uint4 text[8];
-	ulong State[25];
-	uint ExpandedKey2[256];
 	__local uint AES0[256], AES1[256], AES2[256], AES3[256];
+	uint ExpandedKey2[256];
+	ulong State[25];
+	uint4 text;
 	
 	Scratchpad += ((get_global_id(0) - get_global_offset(0)));
 	states += (25 * (get_global_id(0) - get_global_offset(0)));
@@ -496,57 +463,61 @@ __kernel void cn2(__global uint4 *Scratchpad, __global ulong *states, __global u
 		AES3[i] = rotate(tmp, 24U);
 	}
 	
-	for(int i = 0; i < 25; ++i) State[i] = states[i];
-	
 	#if defined(__Tahiti__) || defined(__Pitcairn__)
 	
-	for(int i = 0; i < 4; ++i) ((ulong *)ExpandedKey2)[i] = State[i + 4];
-	for(int i = 0; i < 8; ++i) text[i] = vload4(i + 4, (uint *)State);
+	for(int i = 0; i < 4; ++i) ((ulong *)ExpandedKey2)[i] = states[i + 4];
+	text = vload4(get_local_id(1) + 4, (__global uint *)states);
 	
 	#else
 	
-	for(int i = 0; i < 8; ++i) ((ulong2 *)text)[i] = vload2(i + 4, State);
-	((uint8 *)ExpandedKey2)[0] = vload8(1, (uint *)State);
+	text = vload4(get_local_id(1) + 4, (__global uint *)states);
+	((uint8 *)ExpandedKey2)[0] = vload8(1, (__global uint *)states);
 	
 	#endif
 	
 	AESExpandKey256(ExpandedKey2);
 	
-	#pragma unroll 1
+	barrier(CLK_LOCAL_MEM_FENCE);
+	
+	#pragma unroll 2
 	for(int i = 0; i < 0x4000; ++i)
-	{
+	{		
+		text ^= Scratchpad[IDX((i << 3) + get_local_id(1))];
+		
 		#pragma unroll
-		for(int x = 0; x < 8; ++x)
+		for(int j = 0; j < 10; ++j)
+			text = AES_Round(AES0, AES1, AES2, AES3, text, ((uint4 *)ExpandedKey2)[j]);
+	}
+	
+	vstore2(as_ulong2(text), get_local_id(1) + 4, states);
+	
+	barrier(CLK_GLOBAL_MEM_FENCE);
+	
+	if(!get_local_id(1))
+	{
+		for(int i = 0; i < 25; ++i) State[i] = states[i];
+		
+		keccakf1600_2(State);
+		
+		for(int i = 0; i < 25; ++i) states[i] = State[i];
+		
+		switch(State[0] & 3)
 		{
-			text[x] ^= Scratchpad[IDX((i << 3) + x)];
-			
-			#pragma unroll 1
-			for(int j = 0; j < 10; ++j)
-				text[x] = AES_Round(AES0, AES1, AES2, AES3, text[x], ((uint4 *)ExpandedKey2)[j]);
+			case 0:
+				Branch0[atomic_inc(Branch0 + get_global_size(0))] = get_global_id(0) - get_global_offset(0);
+				break;
+			case 1:
+				Branch1[atomic_inc(Branch1 + get_global_size(0))] = get_global_id(0) - get_global_offset(0);
+				break;
+			case 2:
+				Branch2[atomic_inc(Branch2 + get_global_size(0))] = get_global_id(0) - get_global_offset(0);
+				break;
+			case 3:
+				Branch3[atomic_inc(Branch3 + get_global_size(0))] = get_global_id(0) - get_global_offset(0);
+				break;
 		}
 	}
-				
-	for(uint i = 0; i < 8; ++i) vstore2(((ulong2 *)text)[i], i + 4, State);
 	
-	keccakf1600_2(State);
-		
-	for(int i = 0; i < 25; ++i) states[i] = State[i];
-	
-	switch(State[0] & 3)
-	{
-		case 0:
-			Branch0[atomic_inc(Branch0 + ThreadCount)] = get_global_id(0) - get_global_offset(0);
-			break;
-		case 1:
-			Branch1[atomic_inc(Branch1 + ThreadCount)] = get_global_id(0) - get_global_offset(0);
-			break;
-		case 2:
-			Branch2[atomic_inc(Branch2 + ThreadCount)] = get_global_id(0) - get_global_offset(0);
-			break;
-		case 3:
-			Branch3[atomic_inc(Branch3 + ThreadCount)] = get_global_id(0) - get_global_offset(0);
-			break;
-	}
 	mem_fence(CLK_GLOBAL_MEM_FENCE);
 }
 

@@ -1,7 +1,8 @@
 CC		= gcc
 LD		= gcc
-CFLAGS 	= -D_POSIX_SOURCE -D_GNU_SOURCE -O0 -ggdb3 -std=c11 -pthread -c
-LDFLAGS	= -pthread -O0 -ggdb3
+OPT = -O0 -ggdb3
+CFLAGS 	= -D_POSIX_SOURCE -D_GNU_SOURCE $(OPT) -pthread -c -std=c11
+LDFLAGS	= -pthread $(OPT)
 LIBS	= -ljansson -lOpenCL -ldl
 
 all:

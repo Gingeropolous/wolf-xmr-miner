@@ -80,6 +80,8 @@ JobInfo CurrentJob;
 typedef struct _Share
 {
 	uint32_t Nonce;
+	uint8_t Blob[76];
+	char *ID;
 	struct _Share *next;
 } Share;
 
@@ -111,12 +113,29 @@ void FreeShare(Share *share)
 
 ShareQueue CurrentQueue;
 pthread_mutex_t QueueMutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t QueueCond = PTHREAD_COND_INITIALIZER;
 
 typedef struct _PoolBroadcastInfo
 {
 	int poolsocket;
 	WorkerInfo WorkerData;
 } PoolBroadcastInfo;
+
+int sendit(int fd, char *buf, int len)
+{
+	int rc;
+	do
+	{
+		rc = send(fd, buf, len, 0);
+		if (rc == -1)
+			return rc;
+		buf += rc;
+		len -= rc;
+	} while (len > 0);
+	// Add the very important Stratum newline
+	rc = send(fd, "\n", 1, 0);
+	return rc < 1 ? -1 : 0;
+}
 
 // WARNING/TODO/FIXME: ID needs to be a global counter with atomic accesses
 // TODO/FIXME: Check various calls for error
@@ -127,14 +146,16 @@ void *PoolBroadcastThreadProc(void *Info)
 	pthread_mutex_lock(&QueueMutex);
 	CurrentQueue.first = CurrentQueue.last = NULL;
 	pthread_mutex_unlock(&QueueMutex);
-	
+	void *c_ctx = cryptonight_ctx();
+
+	pthread_mutex_lock(&QueueMutex);
 	for(;;)
 	{
-		while(pthread_mutex_trylock(&QueueMutex)) Sleep(1);
+		pthread_cond_wait(&QueueCond, &QueueMutex);
 		for(Share *CurShare = RemoveShare(&CurrentQueue); CurShare; CurShare = RemoveShare(&CurrentQueue))
 		{
 			uint32_t ShareNonce, ShareTime, ShareExtranonce2;
-			char ASCIINonce[9], ASCIIResult[65], *temp, *rawsubmitrequest;
+			char ASCIINonce[9], ASCIIResult[65], *temp;
 			json_t *msg, *params;
 			uint8_t HashInput[76], HashResult[32];
 			int bytes, ret;
@@ -145,15 +166,12 @@ void *PoolBroadcastThreadProc(void *Info)
 			msg = json_object();
 			params = json_object();
 			
-			pthread_mutex_lock(&JobMutex);
 			json_object_set_new(params, "id", json_string(pbinfo->XMRAuthID));
-			json_object_set_new(params, "job_id", json_string(CurrentJob.ID));
+			json_object_set_new(params, "job_id", json_string(CurShare->ID));
 			json_object_set_new(params, "nonce", json_string(ASCIINonce));
 			
-			ASCIIHexToBinary(HashInput, CurrentJob.XMRBlob, 76 * 2);
-			pthread_mutex_unlock(&JobMutex);
-			((uint32_t *)(HashInput + 39))[0] = ShareNonce;
-			cryptonight_hash(HashResult, HashInput, 76);
+			((uint32_t *)(CurShare->Blob + 39))[0] = ShareNonce;
+			cryptonight_hash_ctx(HashResult, CurShare->Blob, c_ctx);
 			BinaryToASCIIHex(ASCIIResult, HashResult, 32);
 			
 			json_object_set_new(params, "result", json_string(ASCIIResult));
@@ -169,32 +187,19 @@ void *PoolBroadcastThreadProc(void *Info)
 			temp = json_dumps(msg, JSON_PRESERVE_ORDER);
 			Log(LOG_NETDEBUG, "Request: %s\n", temp);
 			
-			// TODO/FIXME: Check for super unlikely error here
-			rawsubmitrequest = malloc(strlen(temp) + 16);
-			strcpy(rawsubmitrequest, temp);
-			
 			// No longer needed
 			json_decref(msg);
+
+			ret = sendit(pbinfo->sockfd, temp, strlen(temp));
+			free(temp);
+			if (ret == -1)
+				return(NULL);
 			
-			// Add the very important Stratum newline
-			strcat(rawsubmitrequest, "\n");
-			
-			bytes = 0;
-				
-			// Send the shit - but send() might not get it all out in one go.
-			do
-			{
-				ret = send(pbinfo->sockfd, rawsubmitrequest + bytes, strlen(rawsubmitrequest) - bytes, 0);
-				if(ret == -1) return(NULL);
-				
-				bytes += ret;
-			} while(bytes < strlen(rawsubmitrequest));
-			
-			free(rawsubmitrequest);
 			FreeShare(CurShare);			
 		}
-		pthread_mutex_unlock(&QueueMutex);
 	}
+	pthread_mutex_unlock(&QueueMutex);
+	free(c_ctx);
 	return(NULL);
 }
 
@@ -723,13 +728,13 @@ void *StratumThreadProc(void *InfoPtr)
 	char *workerinfo[3];
 	int poolsocket, bytes, ret;
 	size_t PartialMessageOffset;
-	char *rawrequest, rawresponse[STRATUM_MAX_MESSAGE_LEN_BYTES], partial[STRATUM_MAX_MESSAGE_LEN_BYTES];
+	char rawresponse[STRATUM_MAX_MESSAGE_LEN_BYTES], partial[STRATUM_MAX_MESSAGE_LEN_BYTES];
 	PoolInfo *Pool = (PoolInfo *)InfoPtr;
 	bool GotSubscriptionResponse = false, GotFirstJob = false;
 	
 	poolsocket = Pool->sockfd;
 	
-	uint8_t *temp, *rawloginrequest;
+	uint8_t *temp;
 	json_t *requestobj = json_object();
 	json_t *loginobj = json_object();
 	
@@ -745,28 +750,13 @@ void *StratumThreadProc(void *InfoPtr)
 	temp = json_dumps(requestobj, JSON_PRESERVE_ORDER);
 	Log(LOG_NETDEBUG, "Request: %s\n", temp);
 	
-	// TODO/FIXME: Check for super unlikely error here
-	rawloginrequest = malloc(strlen(temp) + 16);
-	strcpy(rawloginrequest, temp);
-	
 	// No longer needed
 	json_decref(requestobj);
-	
-	// Add the very important Stratum newline
-	strcat(rawloginrequest, "\n");
-	
-	bytes = 0;
-		
-	// Send the shit - but send() might not get it all out in one go.
-	do
-	{
-		ret = send(Pool->sockfd, rawloginrequest + bytes, strlen(rawloginrequest) - bytes, 0);
-		if(ret == -1) return(NULL);
-		
-		bytes += ret;
-	} while(bytes < strlen(rawloginrequest));
-	
-	free(rawloginrequest);
+
+	ret = sendit(Pool->sockfd, temp, strlen(temp));
+	free(temp);
+	if (ret == -1)
+		return(NULL);
 	
 	CurrentJob.Initialized = false;
 	PartialMessageOffset = 0;
@@ -817,29 +807,14 @@ void *StratumThreadProc(void *InfoPtr)
 			
 			temp = json_dumps(requestobj, JSON_PRESERVE_ORDER);
 			Log(LOG_NETDEBUG, "Request: %s\n", temp);
-			
-			// TODO/FIXME: Check for super unlikely error here
-			rawloginrequest = malloc(strlen(temp) + 16);
-			strcpy(rawloginrequest, temp);
-			
+
 			// No longer needed
 			json_decref(requestobj);
 			
-			// Add the very important Stratum newline
-			strcat(rawloginrequest, "\n");
-			
-			bytes = 0;
-				
-			// Send the shit - but send() might not get it all out in one go.
-			do
-			{
-				ret = send(Pool->sockfd, rawloginrequest + bytes, strlen(rawloginrequest) - bytes, 0);
-				if(ret == -1) return(NULL);
-				
-				bytes += ret;
-			} while(bytes < strlen(rawloginrequest));
-			
-			free(rawloginrequest);
+			ret = sendit(Pool->sockfd, temp, strlen(temp));
+			free(temp);
+			if (ret == -1)
+				return(NULL);
 			
 			CurrentJob.Initialized = false;
 			PartialMessageOffset = 0;
@@ -960,8 +935,10 @@ void *StratumThreadProc(void *InfoPtr)
 						return(NULL);
 					}
 					
+					const char *val = json_string_value(blob);
 					pthread_mutex_lock(&JobMutex);
-					CurrentJob.XMRBlob = strdup(json_string_value(blob));
+					ASCIIHexToBinary(CurrentJob.XMRBlob, val, strlen(val));
+					free(CurrentJob.ID);
 					CurrentJob.ID = strdup(json_string_value(jid));
 					CurrentJob.XMRTarget = strtoul(json_string_value(target), NULL, 16);		// This is bad, and I feel bad
 					CurrentJob.Initialized = 1;
@@ -1004,8 +981,10 @@ void *StratumThreadProc(void *InfoPtr)
 						return(NULL);
 					}
 					
+					const char *val = json_string_value(blob);
 					pthread_mutex_lock(&JobMutex);
-					CurrentJob.XMRBlob = strdup(json_string_value(blob));
+					ASCIIHexToBinary(CurrentJob.XMRBlob, val, strlen(val));
+					free(CurrentJob.ID);
 					CurrentJob.ID = strdup(json_string_value(jid));
 					CurrentJob.XMRTarget = strtoul(json_string_value(target), NULL, 16);		// This is bad, and I feel bad
 					pthread_mutex_unlock(&JobMutex);
@@ -1058,7 +1037,7 @@ void *MinerThreadProc(void *Info)
 	JobID = strdup(CurrentJob.ID);
 	MTInfo->AlgoCtx.Nonce = StartNonce;
 	
-	ASCIIHexToBinary(TmpWork, CurrentJob.XMRBlob, strlen(CurrentJob.XMRBlob));
+	memcpy(TmpWork, CurrentJob.XMRBlob, sizeof(CurrentJob.XMRBlob));
 	memset(FullTarget, 0xFF, 32);
 	FullTarget[7] = __builtin_bswap32(CurrentJob.XMRTarget);
 	pthread_mutex_unlock(&JobMutex);
@@ -1086,7 +1065,7 @@ void *MinerThreadProc(void *Info)
 			JobID = strdup(CurrentJob.ID);
 			MTInfo->AlgoCtx.Nonce = StartNonce;
 			
-			ASCIIHexToBinary(TmpWork, CurrentJob.XMRBlob, strlen(CurrentJob.XMRBlob));
+			memcpy(TmpWork, CurrentJob.XMRBlob, sizeof(CurrentJob.XMRBlob));
 			memset(FullTarget, 0xFF, 32);
 			FullTarget[7] = __builtin_bswap32(CurrentJob.XMRTarget);
 			pthread_mutex_unlock(&JobMutex);
@@ -1116,13 +1095,17 @@ void *MinerThreadProc(void *Info)
 			{
 				Log(LOG_DEBUG, "Thread %d, GPU ID %d, GPU Type: %s: SHARE found (nonce 0x%.8X)!", MTInfo->ThreadID, *MTInfo->AlgoCtx.GPUIdxs, MTInfo->PlatformContext->Devices[*MTInfo->AlgoCtx.GPUIdxs].DeviceName, Results[i]);
 				
-				Share *NewShare = (Share *)malloc(sizeof(Share));
+				Share *NewShare = (Share *)malloc(sizeof(Share)+strlen(JobID)+1);
 				
 				NewShare->Nonce = Results[i];
+				memcpy(NewShare->Blob, TmpWork, sizeof(NewShare->Blob));
 				NewShare->next = NULL;
+				NewShare->ID = (char *)(NewShare+1);
+				strcpy(NewShare->ID, JobID);
 				
 				pthread_mutex_lock(&QueueMutex);
 				SubmitShare(&CurrentQueue, NewShare);
+				pthread_cond_signal(&QueueCond);
 				pthread_mutex_unlock(&QueueMutex);				
 			}
 		} while(MTInfo->AlgoCtx.Nonce < (PrevNonce + 1024));

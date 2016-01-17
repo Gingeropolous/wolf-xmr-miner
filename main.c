@@ -782,13 +782,15 @@ void *StratumThreadProc(void *InfoPtr)
 		{
 			Log(LOG_NOTIFY, "Stratum connection to pool timed out.");
 			closesocket(poolsocket);
+retry:
 			poolsocket = Pool->sockfd = ConnectToPool(Pool->StrippedURL, Pool->Port);
 			
 			// TODO/FIXME: This exit is bad and should be replaced with better flow control
 			if(poolsocket == INVALID_SOCKET)
 			{
-				Log(LOG_ERROR, "Unable to reconnect to pool. We be fucked.");
-				exit(0);			
+				Log(LOG_ERROR, "Unable to reconnect to pool. Sleeping 10 seconds...\n");
+				sleep(10);
+				goto retry;
 			}
 			
 			Log(LOG_NOTIFY, "Reconnected to pool... authenticating...");

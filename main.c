@@ -722,6 +722,12 @@ int32_t SetupXMRTest(AlgoContext *HashData, OCLPlatform *OCL, uint32_t DeviceIdx
 	return(ERR_SUCCESS);
 }
 
+static void RestartMiners(PoolInfo *Pool)
+{
+	for(int i = 0; i < Pool->MinerThreadCount; ++i)
+		atomic_store(RestartMining + i, true);
+}
+
 void *StratumThreadProc(void *InfoPtr)
 {
 	uint64_t id = 1;
@@ -782,6 +788,7 @@ void *StratumThreadProc(void *InfoPtr)
 		{
 			Log(LOG_NOTIFY, "Stratum connection to pool timed out.");
 			closesocket(poolsocket);
+			RestartMiners(Pool);
 retry:
 			poolsocket = Pool->sockfd = ConnectToPool(Pool->StrippedURL, Pool->Port);
 			
@@ -992,8 +999,7 @@ retry:
 					pthread_mutex_unlock(&JobMutex);
 					
 					// No cleanjobs param, so we flush every time
-					for(int i = 0; i < Pool->MinerThreadCount; ++i)
-						atomic_store(RestartMining + i, true);
+					RestartMiners(Pool);
 						
 					Log(LOG_NOTIFY, "Pool requested miner discard all previous work - probably new block on the network.");
 				}	

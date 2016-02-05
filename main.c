@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <jansson.h>
 #include <stdatomic.h>
+#include <cpuid.h>
 
 #ifdef __linux__
 
@@ -48,6 +49,8 @@ typedef struct _StatusInfo
 
 pthread_mutex_t StatusMutex = PTHREAD_MUTEX_INITIALIZER;
 StatusInfo GlobalStatus;
+
+static cryptonight_func *cryptonight_hash_ctx;
 
 typedef struct _WorkerInfo
 {
@@ -1038,6 +1041,10 @@ void *MinerThreadProc(void *Info)
 	uint32_t StartNonce = (0xFFFFFFFFU / MTInfo->TotalMinerThreads) * MTInfo->ThreadID;
 	uint32_t MaxNonce = StartNonce + (0xFFFFFFFFU / MTInfo->TotalMinerThreads);
 	uint32_t Nonce = StartNonce, PrevNonce, platform = 0, device = 1, CurENonce2;
+	struct cryptonight_ctx *ctx;
+	uint32_t *nonceptr = (uint32_t *)((char *)TmpWork + 39);
+	uint32_t cpu_max_nonce;
+	unsigned long hashes_done;
 	
 	// First time we're getting work, allocate JobID, and fill it
 	// with the ID of the current job, then generate work. 
@@ -1052,8 +1059,12 @@ void *MinerThreadProc(void *Info)
 	
 	//Log(LOG_DEBUG, "Short target: %16llX", FullTarget[7]);
 	
-	err = XMRSetKernelArgs(&MTInfo->AlgoCtx, TmpWork, FullTarget[7]);
-	if(err) return(NULL);
+	if (MTInfo->PlatformContext) {
+		err = XMRSetKernelArgs(&MTInfo->AlgoCtx, TmpWork, FullTarget[7]);
+		if(err) return(NULL);
+	} else {
+		ctx = cryptonight_ctx();
+	}
 	
 	while(!ExitFlag)
 	{
@@ -1067,7 +1078,10 @@ void *MinerThreadProc(void *Info)
 		pthread_mutex_lock(&JobMutex);
 		if(strcmp(JobID, CurrentJob.ID))
 		{
-			Log(LOG_DEBUG, "Thread %d, GPU ID %d, GPU Type: %s: Detected new job, regenerating work.", MTInfo->ThreadID, *MTInfo->AlgoCtx.GPUIdxs, MTInfo->PlatformContext->Devices[*MTInfo->AlgoCtx.GPUIdxs].DeviceName);
+			if (MTInfo->PlatformContext)
+				Log(LOG_DEBUG, "Thread %d, GPU ID %d, GPU Type: %s: Detected new job, regenerating work.", MTInfo->ThreadID, *MTInfo->AlgoCtx.GPUIdxs, MTInfo->PlatformContext->Devices[*MTInfo->AlgoCtx.GPUIdxs].DeviceName);
+			else
+				Log(LOG_DEBUG, "Thread %d, (CPU): Detected new job, regenerating work.", MTInfo->ThreadID);
 			free(JobID);
 			
 			JobID = strdup(CurrentJob.ID);
@@ -1078,34 +1092,78 @@ void *MinerThreadProc(void *Info)
 			FullTarget[7] = __builtin_bswap32(CurrentJob.XMRTarget);
 			pthread_mutex_unlock(&JobMutex);
 			
-			err = XMRSetKernelArgs(&MTInfo->AlgoCtx, TmpWork, FullTarget[7]);
-			if(err) return(NULL);
+			if (MTInfo->PlatformContext) {
+				err = XMRSetKernelArgs(&MTInfo->AlgoCtx, TmpWork, FullTarget[7]);
+				if(err) return(NULL);
+			} else {
+				*nonceptr = StartNonce;
+			}
 		}
 		else
 		{
+			if (!MTInfo->PlatformContext)
+				++(*nonceptr);
 			pthread_mutex_unlock(&JobMutex);
 		}
 		
 		PrevNonce = MTInfo->AlgoCtx.Nonce;
+		if (!MTInfo->PlatformContext) {
+			cpu_max_nonce = *nonceptr + 60;
+			if (cpu_max_nonce > MaxNonce)
+				cpu_max_nonce = MaxNonce;
+		}
 		
 		begin = MinerGetCurTime();
 		
-		do
-		{
-			cl_uint Results[0x100] = { 0 };
-			
-			err = RunXMRTest(&MTInfo->AlgoCtx, Results);
-			if(err) return(NULL);
-			
-			if(atomic_load(RestartMining + MTInfo->ThreadID)) break;
-			
-			for(int i = 0; i < Results[0xFF]; ++i)
+		if (MTInfo->PlatformContext) {
+			do
 			{
-				Log(LOG_DEBUG, "Thread %d, GPU ID %d, GPU Type: %s: SHARE found (nonce 0x%.8X)!", MTInfo->ThreadID, *MTInfo->AlgoCtx.GPUIdxs, MTInfo->PlatformContext->Devices[*MTInfo->AlgoCtx.GPUIdxs].DeviceName, Results[i]);
+				cl_uint Results[0x100] = { 0 };
+
+				err = RunXMRTest(&MTInfo->AlgoCtx, Results);
+				if(err) return(NULL);
 				
+				if(atomic_load(RestartMining + MTInfo->ThreadID)) break;
+
+				for(int i = 0; i < Results[0xFF]; ++i)
+				{
+					Log(LOG_DEBUG, "Thread %d, GPU ID %d, GPU Type: %s: SHARE found (nonce 0x%.8X)!", MTInfo->ThreadID, *MTInfo->AlgoCtx.GPUIdxs, MTInfo->PlatformContext->Devices[*MTInfo->AlgoCtx.GPUIdxs].DeviceName, Results[i]);
+
+					Share *NewShare = (Share *)malloc(sizeof(Share)+strlen(JobID)+1);
+
+					NewShare->Nonce = Results[i];
+					memcpy(NewShare->Blob, TmpWork, sizeof(NewShare->Blob));
+					NewShare->next = NULL;
+					NewShare->ID = (char *)(NewShare+1);
+					strcpy(NewShare->ID, JobID);
+
+					pthread_mutex_lock(&QueueMutex);
+					SubmitShare(&CurrentQueue, NewShare);
+					pthread_cond_signal(&QueueCond);
+					pthread_mutex_unlock(&QueueMutex);
+				}
+			} while(MTInfo->AlgoCtx.Nonce < (PrevNonce + 1024));
+		} else {
+			uint32_t n = *nonceptr - 1;
+			const uint32_t first_nonce = n+1;
+			const uint32_t Htarg = FullTarget[7];
+			uint32_t hash[32/4] __attribute__((aligned(32)));
+			int found = 0;
+again:
+			do {
+				*nonceptr = ++n;
+				cryptonight_hash_ctx(hash, TmpWork, ctx);
+				if (hash[7] < FullTarget[7]) {
+					found = 1;
+					break;
+				}
+			} while (n <= cpu_max_nonce && !atomic_load(RestartMining + MTInfo->ThreadID));
+			hashes_done = n - first_nonce + 1;
+			if (found) {
+				Log(LOG_DEBUG, "Thread %d, (CPU): SHARE found (nonce 0x%.8X)!", MTInfo->ThreadID, *nonceptr);
 				Share *NewShare = (Share *)malloc(sizeof(Share)+strlen(JobID)+1);
 				
-				NewShare->Nonce = Results[i];
+				NewShare->Nonce = *nonceptr;
 				memcpy(NewShare->Blob, TmpWork, sizeof(NewShare->Blob));
 				NewShare->next = NULL;
 				NewShare->ID = (char *)(NewShare+1);
@@ -1114,24 +1172,35 @@ void *MinerThreadProc(void *Info)
 				pthread_mutex_lock(&QueueMutex);
 				SubmitShare(&CurrentQueue, NewShare);
 				pthread_cond_signal(&QueueCond);
-				pthread_mutex_unlock(&QueueMutex);				
+				pthread_mutex_unlock(&QueueMutex);
+			} else if (cpu_max_nonce < MaxNonce && hashes_done < 1000 &&
+				!atomic_load(RestartMining + MTInfo->ThreadID)){
+				cpu_max_nonce += 60;
+				if (cpu_max_nonce > MaxNonce)
+					cpu_max_nonce = MaxNonce;
+				goto again;
 			}
-		} while(MTInfo->AlgoCtx.Nonce < (PrevNonce + 1024));
+		}
 		
 		end = MinerGetCurTime();
-		
 		double Seconds = SecondsElapsed(begin, end);
 		
 		pthread_mutex_lock(&StatusMutex);
-		GlobalStatus.ThreadHashCounts[MTInfo->ThreadID] = MTInfo->AlgoCtx.Nonce - PrevNonce;
+		if (MTInfo->PlatformContext)
+			hashes_done = MTInfo->AlgoCtx.Nonce - PrevNonce;
+		GlobalStatus.ThreadHashCounts[MTInfo->ThreadID] = hashes_done;
 		GlobalStatus.ThreadTimes[MTInfo->ThreadID] = Seconds;
 		pthread_mutex_unlock(&StatusMutex);
 		
-		Log(LOG_INFO, "Thread %d, GPU ID %d, GPU Type: %s: %.02fH/s\n", MTInfo->ThreadID, *MTInfo->AlgoCtx.GPUIdxs, MTInfo->PlatformContext->Devices[*MTInfo->AlgoCtx.GPUIdxs].DeviceName, ((MTInfo->AlgoCtx.Nonce - PrevNonce)) / (Seconds));
+		if (MTInfo->PlatformContext)
+			Log(LOG_INFO, "Thread %d, GPU ID %d, GPU Type: %s: %.02fH/s at diff %g", MTInfo->ThreadID, *MTInfo->AlgoCtx.GPUIdxs, MTInfo->PlatformContext->Devices[*MTInfo->AlgoCtx.GPUIdxs].DeviceName, hashes_done / (Seconds), (double)0xffffffff/FullTarget[7]);
+		else
+			Log(LOG_INFO, "Thread %d, (CPU): %.02fH/s at diff %g", MTInfo->ThreadID, hashes_done / (Seconds), (double)0xffffffff/FullTarget[7]);
 	}
 	
 	free(JobID);
-	XMRCleanup(&MTInfo->AlgoCtx);
+	if (MTInfo->PlatformContext)
+		XMRCleanup(&MTInfo->AlgoCtx);
 	
 	return(NULL);
 }
@@ -1433,6 +1502,8 @@ int main(int argc, char **argv)
 	OCLPlatform PlatformContext;
 	int ret, poolsocket, PlatformIdx = 0;
 	pthread_t Stratum, ADLThread, BroadcastThread, *MinerWorker;
+	unsigned int tmp1, tmp2, tmp3, tmp4;
+	int use_aesni = 0;
 	
 	InitLogging(LOG_NETDEBUG);
 	
@@ -1444,6 +1515,16 @@ int main(int argc, char **argv)
 	
 	if(ParseConfigurationFile(argv[1], &Settings)) return(0);
 	
+	if (__get_cpuid_max(0, &tmp1) >= 1) {
+		__get_cpuid(1, &tmp1, &tmp2, &tmp3, &tmp4);
+		if (tmp3 & 0x2000000)
+			use_aesni = 1;
+	}
+	if (use_aesni)
+		cryptonight_hash_ctx = cryptonight_hash_aesni;
+	else
+		cryptonight_hash_ctx = cryptonight_hash_dumb;
+
 	MThrInfo = (MinerThreadInfo *)malloc(sizeof(MinerThreadInfo) * Settings.TotalThreads);
 	MinerWorker = (pthread_t *)malloc(sizeof(pthread_t) * Settings.TotalThreads);
 	
@@ -1454,6 +1535,7 @@ int main(int argc, char **argv)
 	ExitHandler.sa_handler = SigHandler;
 	
 	sigaction(SIGINT, &ExitHandler, NULL);
+	signal(SIGPIPE, SIG_IGN);
 	
 	#else
 	
@@ -1600,18 +1682,23 @@ int main(int argc, char **argv)
 	
 	// Note to self - move this list BS into the InitOpenCLPlatformContext() routine
 	uint32_t *GPUIdxList = (uint32_t *)malloc(sizeof(uint32_t) * Settings.NumGPUs);
+	uint32_t numGPUs = Settings.NumGPUs;
 	
-	for(int i = 0; i < Settings.NumGPUs; ++i) GPUIdxList[i] = Settings.GPUSettings[i].Index;
+	for(int i = 0; i < Settings.NumGPUs; ++i) {
+		GPUIdxList[i] = Settings.GPUSettings[i].Index;
+		if (Settings.GPUSettings[i].Index == -1)
+			numGPUs--;
+	}
 	
-	ret = InitOpenCLPlatformContext(&PlatformContext, PlatformIdx, Settings.NumGPUs, GPUIdxList);
+	ret = InitOpenCLPlatformContext(&PlatformContext, PlatformIdx, numGPUs, GPUIdxList);
 	if(ret) return(0);
 	
 	free(GPUIdxList);
 	
-	for(int i = 0; i < Settings.NumGPUs; ++i) PlatformContext.Devices[i].rawIntensity = Settings.GPUSettings[i].rawIntensity;
+	for(int i = 0; i < numGPUs; ++i) PlatformContext.Devices[i].rawIntensity = Settings.GPUSettings[i].rawIntensity;
 	
 	// Check for zero was done when parsing config
-	for(int i = 0; i < Settings.NumGPUs; ++i)
+	for(int i = 0; i < numGPUs; ++i)
 	{
 		if(Settings.GPUSettings[i].Worksize > PlatformContext.Devices[i].MaximumWorkSize)
 		{
@@ -1644,10 +1731,14 @@ int main(int argc, char **argv)
 	{
 		for(int x = 0; x < Settings.GPUSettings[GPUIdx].Threads; ++x)
 		{
-			SetupXMRTest(&MThrInfo[ThrIdx + x].AlgoCtx, &PlatformContext, GPUIdx);
+			if (Settings.GPUSettings[GPUIdx].Index != -1) {
+				SetupXMRTest(&MThrInfo[ThrIdx + x].AlgoCtx, &PlatformContext, GPUIdx);
+				MThrInfo[ThrIdx + x].PlatformContext = &PlatformContext;
+			} else {
+				MThrInfo[ThrIdx + x].PlatformContext = NULL;
+			}
 			MThrInfo[ThrIdx + x].ThreadID = ThrIdx + x;
 			MThrInfo[ThrIdx + x].TotalMinerThreads = Settings.TotalThreads;
-			MThrInfo[ThrIdx + x].PlatformContext = &PlatformContext;
 		}		
 	}
 	

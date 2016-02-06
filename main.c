@@ -780,7 +780,7 @@ void *StratumThreadProc(void *InfoPtr)
 		struct timeval timeout;
 		char StratumMsg[STRATUM_MAX_MESSAGE_LEN_BYTES];
 		
-		timeout.tv_sec = 120;
+		timeout.tv_sec = 180;
 		timeout.tv_usec = 0;
 		FD_ZERO(&readfds);
 		FD_SET(poolsocket, &readfds);
@@ -952,9 +952,10 @@ retry:
 					ASCIIHexToBinary(CurrentJob.XMRBlob, val, strlen(val));
 					free(CurrentJob.ID);
 					CurrentJob.ID = strdup(json_string_value(jid));
-					CurrentJob.XMRTarget = strtoul(json_string_value(target), NULL, 16);		// This is bad, and I feel bad
+					CurrentJob.XMRTarget = __builtin_bswap32(strtoul(json_string_value(target), NULL, 16));
 					CurrentJob.Initialized = 1;
 					pthread_mutex_unlock(&JobMutex);
+					Log(LOG_NOTIFY, "New job at diff %g", (double)0xffffffff / CurrentJob.XMRTarget);
 				}
 				json_decref(result);
 			}
@@ -998,13 +999,13 @@ retry:
 					ASCIIHexToBinary(CurrentJob.XMRBlob, val, strlen(val));
 					free(CurrentJob.ID);
 					CurrentJob.ID = strdup(json_string_value(jid));
-					CurrentJob.XMRTarget = strtoul(json_string_value(target), NULL, 16);		// This is bad, and I feel bad
+					CurrentJob.XMRTarget = __builtin_bswap32(strtoul(json_string_value(target), NULL, 16));
 					pthread_mutex_unlock(&JobMutex);
 					
 					// No cleanjobs param, so we flush every time
 					RestartMiners(Pool);
 						
-					Log(LOG_NOTIFY, "Pool requested miner discard all previous work - probably new block on the network.");
+					Log(LOG_NOTIFY, "New job at diff %g", (double)0xffffffff / CurrentJob.XMRTarget);
 				}	
 				else
 				{
@@ -1036,7 +1037,7 @@ void *MinerThreadProc(void *Info)
 	double CurrentDiff;
 	char *JobID = NULL;
 	uint8_t BlockHdr[128];
-	uint32_t FullTarget[8], TmpWork[20];
+	uint32_t Target, TmpWork[20];
 	MinerThreadInfo *MTInfo = (MinerThreadInfo *)Info;
 	uint32_t StartNonce = (0xFFFFFFFFU / MTInfo->TotalMinerThreads) * MTInfo->ThreadID;
 	uint32_t MaxNonce = StartNonce + (0xFFFFFFFFU / MTInfo->TotalMinerThreads);
@@ -1053,17 +1054,15 @@ void *MinerThreadProc(void *Info)
 	MTInfo->AlgoCtx.Nonce = StartNonce;
 	
 	memcpy(TmpWork, CurrentJob.XMRBlob, sizeof(CurrentJob.XMRBlob));
-	memset(FullTarget, 0xFF, 32);
-	FullTarget[7] = __builtin_bswap32(CurrentJob.XMRTarget);
+	Target = CurrentJob.XMRTarget;
 	pthread_mutex_unlock(&JobMutex);
 	
-	//Log(LOG_DEBUG, "Short target: %16llX", FullTarget[7]);
-	
 	if (MTInfo->PlatformContext) {
-		err = XMRSetKernelArgs(&MTInfo->AlgoCtx, TmpWork, FullTarget[7]);
+		err = XMRSetKernelArgs(&MTInfo->AlgoCtx, TmpWork, Target);
 		if(err) return(NULL);
 	} else {
 		ctx = cryptonight_ctx();
+		*nonceptr = StartNonce;
 	}
 	
 	while(!ExitFlag)
@@ -1088,12 +1087,11 @@ void *MinerThreadProc(void *Info)
 			MTInfo->AlgoCtx.Nonce = StartNonce;
 			
 			memcpy(TmpWork, CurrentJob.XMRBlob, sizeof(CurrentJob.XMRBlob));
-			memset(FullTarget, 0xFF, 32);
-			FullTarget[7] = __builtin_bswap32(CurrentJob.XMRTarget);
+			Target = CurrentJob.XMRTarget;
 			pthread_mutex_unlock(&JobMutex);
 			
 			if (MTInfo->PlatformContext) {
-				err = XMRSetKernelArgs(&MTInfo->AlgoCtx, TmpWork, FullTarget[7]);
+				err = XMRSetKernelArgs(&MTInfo->AlgoCtx, TmpWork, Target);
 				if(err) return(NULL);
 			} else {
 				*nonceptr = StartNonce;
@@ -1146,14 +1144,13 @@ void *MinerThreadProc(void *Info)
 		} else {
 			uint32_t n = *nonceptr - 1;
 			const uint32_t first_nonce = n+1;
-			const uint32_t Htarg = FullTarget[7];
 			uint32_t hash[32/4] __attribute__((aligned(32)));
 			int found = 0;
 again:
 			do {
 				*nonceptr = ++n;
 				cryptonight_hash_ctx(hash, TmpWork, ctx);
-				if (hash[7] < FullTarget[7]) {
+				if (hash[7] < Target) {
 					found = 1;
 					break;
 				}
@@ -1193,9 +1190,9 @@ again:
 		pthread_mutex_unlock(&StatusMutex);
 		
 		if (MTInfo->PlatformContext)
-			Log(LOG_INFO, "Thread %d, GPU ID %d, GPU Type: %s: %.02fH/s at diff %g", MTInfo->ThreadID, *MTInfo->AlgoCtx.GPUIdxs, MTInfo->PlatformContext->Devices[*MTInfo->AlgoCtx.GPUIdxs].DeviceName, hashes_done / (Seconds), (double)0xffffffff/FullTarget[7]);
+			Log(LOG_INFO, "Thread %d, GPU ID %d, GPU Type: %s: %.02fH/s", MTInfo->ThreadID, *MTInfo->AlgoCtx.GPUIdxs, MTInfo->PlatformContext->Devices[*MTInfo->AlgoCtx.GPUIdxs].DeviceName, hashes_done / (Seconds));
 		else
-			Log(LOG_INFO, "Thread %d, (CPU): %.02fH/s at diff %g", MTInfo->ThreadID, hashes_done / (Seconds), (double)0xffffffff/FullTarget[7]);
+			Log(LOG_INFO, "Thread %d, (CPU): %.02fH/s", MTInfo->ThreadID, hashes_done / (Seconds));
 	}
 	
 	free(JobID);
@@ -1577,22 +1574,11 @@ int main(int argc, char **argv)
 		return(0);
 	}
 	
-	// TODO: Have ConnectToPool() return a Pool struct
-	poolsocket = ConnectToPool(StrippedPoolURL, TmpPort);
-	
-	if(poolsocket == INVALID_SOCKET)
-	{
-		Log(LOG_CRITICAL, "Fatal error connecting to pool.");
-		return(0);
-	}
-	
-	Log(LOG_NOTIFY, "Successfully connected to pool's stratum.");
 	
 	// DO NOT FORGET THIS
 	CurrentJob.Initialized = false;
 	CurrentQueue.first = CurrentQueue.last = NULL;
 	
-	Pool.sockfd = poolsocket;
 	Pool.StrippedURL = strdup(StrippedPoolURL);
 	Pool.Port = strdup(TmpPort);
 	Pool.WorkerData = Settings.Workers[0];
@@ -1672,14 +1658,8 @@ int main(int argc, char **argv)
 	
 	for(int i = 0; i < Settings.TotalThreads; ++i) atomic_init(RestartMining + i, false);
 	
-	ret = pthread_create(&Stratum, NULL, StratumThreadProc, (void *)&Pool);
-	
-	if(ret)
-	{
-		printf("Failed to create Stratum thread.\n");
-		return(0);
-	}
-	
+	Log(LOG_NOTIFY, "Setting up GPU(s).");
+
 	// Note to self - move this list BS into the InitOpenCLPlatformContext() routine
 	uint32_t *GPUIdxList = (uint32_t *)malloc(sizeof(uint32_t) * Settings.NumGPUs);
 	uint32_t numGPUs = Settings.NumGPUs;
@@ -1690,9 +1670,11 @@ int main(int argc, char **argv)
 			numGPUs--;
 	}
 	
-	ret = InitOpenCLPlatformContext(&PlatformContext, PlatformIdx, numGPUs, GPUIdxList);
-	if(ret) return(0);
-	
+	if (numGPUs) {
+		ret = InitOpenCLPlatformContext(&PlatformContext, PlatformIdx, numGPUs, GPUIdxList);
+		if(ret) return(0);
+	}
+
 	free(GPUIdxList);
 	
 	for(int i = 0; i < numGPUs; ++i) PlatformContext.Devices[i].rawIntensity = Settings.GPUSettings[i].rawIntensity;
@@ -1711,6 +1693,39 @@ int main(int argc, char **argv)
 		}
 	}
 	
+	for(int ThrIdx = 0, GPUIdx = 0; ThrIdx < Settings.TotalThreads && GPUIdx < Settings.NumGPUs; ThrIdx += Settings.GPUSettings[GPUIdx].Threads, ++GPUIdx)
+	{
+		for(int x = 0; x < Settings.GPUSettings[GPUIdx].Threads; ++x)
+		{
+			if (Settings.GPUSettings[GPUIdx].Index != -1) {
+				SetupXMRTest(&MThrInfo[ThrIdx + x].AlgoCtx, &PlatformContext, GPUIdx);
+				MThrInfo[ThrIdx + x].PlatformContext = &PlatformContext;
+			} else {
+				MThrInfo[ThrIdx + x].PlatformContext = NULL;
+			}
+			MThrInfo[ThrIdx + x].ThreadID = ThrIdx + x;
+			MThrInfo[ThrIdx + x].TotalMinerThreads = Settings.TotalThreads;
+		}
+	}
+
+	// TODO: Have ConnectToPool() return a Pool struct
+	poolsocket = ConnectToPool(StrippedPoolURL, TmpPort);
+	if(poolsocket == INVALID_SOCKET)
+	{
+		Log(LOG_CRITICAL, "Fatal error connecting to pool.");
+		return(0);
+	}
+	Pool.sockfd = poolsocket;
+
+	Log(LOG_NOTIFY, "Successfully connected to pool's stratum.");
+
+	ret = pthread_create(&Stratum, NULL, StratumThreadProc, (void *)&Pool);
+	if(ret)
+	{
+		printf("Failed to create Stratum thread.\n");
+		return(0);
+	}
+
 	// Wait until we've gotten work and filled
 	// up the job structure before launching the
 	// miner worker threads.
@@ -1726,21 +1741,6 @@ int main(int argc, char **argv)
 	
 	// Work is ready - time to create the broadcast and miner threads
 	pthread_create(&BroadcastThread, NULL, PoolBroadcastThreadProc, (void *)&Pool);
-	
-	for(int ThrIdx = 0, GPUIdx = 0; ThrIdx < Settings.TotalThreads && GPUIdx < Settings.NumGPUs; ThrIdx += Settings.GPUSettings[GPUIdx].Threads, ++GPUIdx)
-	{
-		for(int x = 0; x < Settings.GPUSettings[GPUIdx].Threads; ++x)
-		{
-			if (Settings.GPUSettings[GPUIdx].Index != -1) {
-				SetupXMRTest(&MThrInfo[ThrIdx + x].AlgoCtx, &PlatformContext, GPUIdx);
-				MThrInfo[ThrIdx + x].PlatformContext = &PlatformContext;
-			} else {
-				MThrInfo[ThrIdx + x].PlatformContext = NULL;
-			}
-			MThrInfo[ThrIdx + x].ThreadID = ThrIdx + x;
-			MThrInfo[ThrIdx + x].TotalMinerThreads = Settings.TotalThreads;
-		}		
-	}
 	
 	for(int i = 0; i < Settings.TotalThreads; ++i)
 	{

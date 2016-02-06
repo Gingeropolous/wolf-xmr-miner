@@ -907,7 +907,7 @@ retry:
 					else
 					{
 						GlobalStatus.RejectedWork++;
-						Log(LOG_INFO, "Share rejected (%s): %d/%d (%.02f%%)", json_string_value(json_object_get(result, "status")), GlobalStatus.SolvedWork - GlobalStatus.RejectedWork, GlobalStatus.SolvedWork, (double)(GlobalStatus.SolvedWork - GlobalStatus.RejectedWork) / GlobalStatus.SolvedWork * 100.0);
+						Log(LOG_INFO, "Share rejected (%s): %d/%d (%.02f%%)", json_string_value(json_object_get(err, "message")), GlobalStatus.SolvedWork - GlobalStatus.RejectedWork, GlobalStatus.SolvedWork, (double)(GlobalStatus.SolvedWork - GlobalStatus.RejectedWork) / GlobalStatus.SolvedWork * 100.0);
 					}
 					
 					for(int i = 0; i < Pool->MinerThreadCount; ++i)
@@ -1505,7 +1505,7 @@ int main(int argc, char **argv)
 	unsigned int tmp1, tmp2, tmp3, tmp4;
 	int use_aesni = 0;
 	
-	InitLogging(LOG_NETDEBUG);
+	InitLogging(LOG_INFO);
 	
 	if(argc != 2)
 	{

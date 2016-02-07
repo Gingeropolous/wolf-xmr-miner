@@ -82,10 +82,11 @@ JobInfo CurrentJob;
 
 typedef struct _Share
 {
-	uint32_t Nonce;
-	uint8_t Blob[76];
-	char *ID;
 	struct _Share *next;
+	char *ID;
+	uint32_t Nonce;
+	int Gothash;
+	uint8_t Blob[76];
 } Share;
 
 typedef struct _ShareQueue
@@ -140,12 +141,15 @@ int sendit(int fd, char *buf, int len)
 	return rc < 1 ? -1 : 0;
 }
 
+#define JSON_BUF_LEN	345
+
 // WARNING/TODO/FIXME: ID needs to be a global counter with atomic accesses
 // TODO/FIXME: Check various calls for error
 void *PoolBroadcastThreadProc(void *Info)
 {
 	uint64_t id = 10;
 	PoolInfo *pbinfo = (PoolInfo *)Info;
+	char s[JSON_BUF_LEN];
 	pthread_mutex_lock(&QueueMutex);
 	CurrentQueue.first = CurrentQueue.last = NULL;
 	pthread_mutex_unlock(&QueueMutex);
@@ -157,44 +161,32 @@ void *PoolBroadcastThreadProc(void *Info)
 		pthread_cond_wait(&QueueCond, &QueueMutex);
 		for(Share *CurShare = RemoveShare(&CurrentQueue); CurShare; CurShare = RemoveShare(&CurrentQueue))
 		{
-			uint32_t ShareNonce, ShareTime, ShareExtranonce2;
-			char ASCIINonce[9], ASCIIResult[65], *temp;
-			json_t *msg, *params;
-			uint8_t HashInput[76], HashResult[32];
-			int bytes, ret;
+			char ASCIINonce[9], ASCIIResult[65];
+			uint8_t HashResult[32];
+			int ret, len;
 			
-			ShareNonce = CurShare->Nonce;
-			BinaryToASCIIHex(ASCIINonce, &ShareNonce, 4U);
+			BinaryToASCIIHex(ASCIINonce, &CurShare->Nonce, 4U);
 			
-			msg = json_object();
-			params = json_object();
-			
-			json_object_set_new(params, "id", json_string(pbinfo->XMRAuthID));
-			json_object_set_new(params, "job_id", json_string(CurShare->ID));
-			json_object_set_new(params, "nonce", json_string(ASCIINonce));
-			
-			((uint32_t *)(CurShare->Blob + 39))[0] = ShareNonce;
-			cryptonight_hash_ctx(HashResult, CurShare->Blob, c_ctx);
-			BinaryToASCIIHex(ASCIIResult, HashResult, 32);
-			
-			json_object_set_new(params, "result", json_string(ASCIIResult));
-			
-			json_object_set_new(msg, "method", json_string("submit"));
-			json_object_set_new(msg, "params", params);
-			json_object_set_new(msg, "id", json_integer(1));
-			
+			if (!CurShare->Gothash) {
+				((uint32_t *)(CurShare->Blob + 39))[0] = CurShare->Nonce;
+				cryptonight_hash_ctx(HashResult, CurShare->Blob, c_ctx);
+				BinaryToASCIIHex(ASCIIResult, HashResult, 32);
+			} else {
+				BinaryToASCIIHex(ASCIIResult, CurShare->Blob, 32);
+			}
+			len = snprintf(s, JSON_BUF_LEN,
+			    "{\"method\": \"submit\", \"params\": {\"id\": \"%s\", "
+			    "\"job_id\": \"%s\", \"nonce\": \"%s\", \"result\": \"%s\"}, "
+			    "\"id\":1}\r\n",
+			    pbinfo->XMRAuthID, CurShare->ID, ASCIINonce, ASCIIResult);
+
 			pthread_mutex_lock(&StatusMutex);
 			GlobalStatus.SolvedWork++;
 			pthread_mutex_unlock(&StatusMutex);
 			
-			temp = json_dumps(msg, JSON_PRESERVE_ORDER);
-			Log(LOG_NETDEBUG, "Request: %s\n", temp);
+			Log(LOG_NETDEBUG, "Request: %s", s);
 			
-			// No longer needed
-			json_decref(msg);
-
-			ret = sendit(pbinfo->sockfd, temp, strlen(temp));
-			free(temp);
+			ret = sendit(pbinfo->sockfd, s, len);
 			if (ret == -1)
 				return(NULL);
 			
@@ -740,30 +732,19 @@ void *StratumThreadProc(void *InfoPtr)
 	char rawresponse[STRATUM_MAX_MESSAGE_LEN_BYTES], partial[STRATUM_MAX_MESSAGE_LEN_BYTES];
 	PoolInfo *Pool = (PoolInfo *)InfoPtr;
 	bool GotSubscriptionResponse = false, GotFirstJob = false;
+	char s[JSON_BUF_LEN];
+	int len;
 	
 	poolsocket = Pool->sockfd;
 	
-	uint8_t *temp;
-	json_t *requestobj = json_object();
-	json_t *loginobj = json_object();
-	
-	json_object_set_new(loginobj, "login", json_string(Pool->WorkerData.User));
-	json_object_set_new(loginobj, "pass", json_string(Pool->WorkerData.Pass));
-	json_object_set_new(loginobj, "agent", json_string("wolf-xmr-miner/0.1"));
-	
-	// Current XMR pools are a hack job and make us hardcode an id of 1
-	json_object_set_new(requestobj, "method", json_string("login"));
-	json_object_set_new(requestobj, "params", loginobj);
-	json_object_set_new(requestobj, "id", json_integer(1));
-	
-	temp = json_dumps(requestobj, JSON_PRESERVE_ORDER);
-	Log(LOG_NETDEBUG, "Request: %s\n", temp);
-	
-	// No longer needed
-	json_decref(requestobj);
+	len = snprintf(s, JSON_BUF_LEN, "{\"method\": \"login\", \"params\": "
+		"{\"login\": \"%s\", \"pass\": \"%s\", "
+		"\"agent\": \"wolf-hyc-xmr-miner/0.1\"}, \"id\": 1}\r\n",
+		Pool->WorkerData.User, Pool->WorkerData.Pass);
 
-	ret = sendit(Pool->sockfd, temp, strlen(temp));
-	free(temp);
+	Log(LOG_NETDEBUG, "Request: %s", s);
+
+	ret = sendit(Pool->sockfd, s, len);
 	if (ret == -1)
 		return(NULL);
 	
@@ -805,26 +786,9 @@ retry:
 			
 			Log(LOG_NOTIFY, "Reconnected to pool... authenticating...");
 			
-			requestobj = json_object();
-			loginobj = json_object();
-			
-			json_object_set_new(loginobj, "login", json_string(Pool->WorkerData.User));
-			json_object_set_new(loginobj, "pass", json_string(Pool->WorkerData.Pass));
-			json_object_set_new(loginobj, "agent", json_string("wolf-xmr-miner/0.1"));
-			
-			// Current XMR pools are a hack job and make us hardcode an id of 1
-			json_object_set_new(requestobj, "method", json_string("login"));
-			json_object_set_new(requestobj, "params", loginobj);
-			json_object_set_new(requestobj, "id", json_integer(1));
-			
-			temp = json_dumps(requestobj, JSON_PRESERVE_ORDER);
-			Log(LOG_NETDEBUG, "Request: %s\n", temp);
+			Log(LOG_NETDEBUG, "Request: %s", s);
 
-			// No longer needed
-			json_decref(requestobj);
-			
-			ret = sendit(Pool->sockfd, temp, strlen(temp));
-			free(temp);
+			ret = sendit(Pool->sockfd, s, len);
 			if (ret == -1)
 				return(NULL);
 			
@@ -1130,6 +1094,7 @@ void *MinerThreadProc(void *Info)
 					Share *NewShare = (Share *)malloc(sizeof(Share)+strlen(JobID)+1);
 
 					NewShare->Nonce = Results[i];
+					NewShare->Gothash = 0;
 					memcpy(NewShare->Blob, TmpWork, sizeof(NewShare->Blob));
 					NewShare->next = NULL;
 					NewShare->ID = (char *)(NewShare+1);
@@ -1161,7 +1126,8 @@ again:
 				Share *NewShare = (Share *)malloc(sizeof(Share)+strlen(JobID)+1);
 				
 				NewShare->Nonce = *nonceptr;
-				memcpy(NewShare->Blob, TmpWork, sizeof(NewShare->Blob));
+				NewShare->Gothash = 1;
+				memcpy(NewShare->Blob, hash, 32);
 				NewShare->next = NULL;
 				NewShare->ID = (char *)(NewShare+1);
 				strcpy(NewShare->ID, JobID);

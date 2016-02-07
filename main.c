@@ -74,18 +74,19 @@ typedef struct _PoolInfo
 
 atomic_bool *RestartMining;
 
-pthread_mutex_t Mutex = PTHREAD_MUTEX_INITIALIZER;
 bool ExitFlag = false;
+int ExitPipe[2];
 
 pthread_mutex_t JobMutex = PTHREAD_MUTEX_INITIALIZER;
-JobInfo CurrentJob;
+JobInfo Jobs[2], *CurrentJob;
+int JobIdx;
 
 typedef struct _Share
 {
 	struct _Share *next;
-	char *ID;
 	uint32_t Nonce;
 	int Gothash;
+	char ID[32];
 	uint8_t Blob[76];
 } Share;
 
@@ -150,9 +151,6 @@ void *PoolBroadcastThreadProc(void *Info)
 	uint64_t id = 10;
 	PoolInfo *pbinfo = (PoolInfo *)Info;
 	char s[JSON_BUF_LEN];
-	pthread_mutex_lock(&QueueMutex);
-	CurrentQueue.first = CurrentQueue.last = NULL;
-	pthread_mutex_unlock(&QueueMutex);
 	void *c_ctx = cryptonight_ctx();
 
 	pthread_mutex_lock(&QueueMutex);
@@ -194,7 +192,7 @@ void *PoolBroadcastThreadProc(void *Info)
 		}
 	}
 	pthread_mutex_unlock(&QueueMutex);
-	free(c_ctx);
+	// free(c_ctx);
 	return(NULL);
 }
 
@@ -726,6 +724,7 @@ static void RestartMiners(PoolInfo *Pool)
 void *StratumThreadProc(void *InfoPtr)
 {
 	uint64_t id = 1;
+	JobInfo *NextJob;
 	char *workerinfo[3];
 	int poolsocket, bytes, ret;
 	size_t PartialMessageOffset;
@@ -748,11 +747,12 @@ void *StratumThreadProc(void *InfoPtr)
 	if (ret == -1)
 		return(NULL);
 	
-	CurrentJob.Initialized = false;
 	PartialMessageOffset = 0;
 	
 	SetNonBlockingSocket(Pool->sockfd);
 	
+	NextJob = &Jobs[0];
+
 	// Listen for work until termination.
 	for(;;)
 	{
@@ -792,7 +792,6 @@ retry:
 			if (ret == -1)
 				return(NULL);
 			
-			CurrentJob.Initialized = false;
 			PartialMessageOffset = 0;
 			
 			Log(LOG_NOTIFY, "Reconnected to pool.");
@@ -912,14 +911,15 @@ retry:
 					}
 					
 					const char *val = json_string_value(blob);
+					ASCIIHexToBinary(NextJob->XMRBlob, val, strlen(val));
+					strcpy(NextJob->ID, json_string_value(jid));
+					NextJob->XMRTarget = __builtin_bswap32(strtoul(json_string_value(target), NULL, 16));
 					pthread_mutex_lock(&JobMutex);
-					ASCIIHexToBinary(CurrentJob.XMRBlob, val, strlen(val));
-					free(CurrentJob.ID);
-					CurrentJob.ID = strdup(json_string_value(jid));
-					CurrentJob.XMRTarget = __builtin_bswap32(strtoul(json_string_value(target), NULL, 16));
-					CurrentJob.Initialized = 1;
+					CurrentJob = NextJob;
+					JobIdx++;
+					NextJob = &Jobs[JobIdx&1];
 					pthread_mutex_unlock(&JobMutex);
-					Log(LOG_NOTIFY, "New job at diff %g", (double)0xffffffff / CurrentJob.XMRTarget);
+					Log(LOG_NOTIFY, "New job at diff %g", (double)0xffffffff / CurrentJob->XMRTarget);
 				}
 				json_decref(result);
 			}
@@ -959,17 +959,19 @@ retry:
 					}
 					
 					const char *val = json_string_value(blob);
+					ASCIIHexToBinary(NextJob->XMRBlob, val, strlen(val));
+					strcpy(NextJob->ID, json_string_value(jid));
+					NextJob->XMRTarget = __builtin_bswap32(strtoul(json_string_value(target), NULL, 16));
 					pthread_mutex_lock(&JobMutex);
-					ASCIIHexToBinary(CurrentJob.XMRBlob, val, strlen(val));
-					free(CurrentJob.ID);
-					CurrentJob.ID = strdup(json_string_value(jid));
-					CurrentJob.XMRTarget = __builtin_bswap32(strtoul(json_string_value(target), NULL, 16));
+					CurrentJob = NextJob;
+					JobIdx++;
+					NextJob = &Jobs[JobIdx&1];
 					pthread_mutex_unlock(&JobMutex);
 					
 					// No cleanjobs param, so we flush every time
 					RestartMiners(Pool);
 						
-					Log(LOG_NOTIFY, "New job at diff %g", (double)0xffffffff / CurrentJob.XMRTarget);
+					Log(LOG_NOTIFY, "New job at diff %g", (double)0xffffffff / CurrentJob->XMRTarget);
 				}	
 				else
 				{
@@ -999,8 +1001,8 @@ void *MinerThreadProc(void *Info)
 {
 	int32_t err;
 	double CurrentDiff;
-	char *JobID = NULL;
-	uint8_t BlockHdr[128];
+	int MyJobIdx;
+	char JobID[32];
 	uint32_t Target, TmpWork[20];
 	MinerThreadInfo *MTInfo = (MinerThreadInfo *)Info;
 	uint32_t StartNonce = (0xFFFFFFFFU / MTInfo->TotalMinerThreads) * MTInfo->ThreadID;
@@ -1014,14 +1016,14 @@ void *MinerThreadProc(void *Info)
 	// First time we're getting work, allocate JobID, and fill it
 	// with the ID of the current job, then generate work. 
 	pthread_mutex_lock(&JobMutex);
-	JobID = strdup(CurrentJob.ID);
-	MTInfo->AlgoCtx.Nonce = StartNonce;
-	
-	memcpy(TmpWork, CurrentJob.XMRBlob, sizeof(CurrentJob.XMRBlob));
-	Target = CurrentJob.XMRTarget;
+	MyJobIdx = JobIdx;
+	memcpy(TmpWork, CurrentJob->XMRBlob, sizeof(CurrentJob->XMRBlob));
+	Target = CurrentJob->XMRTarget;
+	strcpy(JobID, CurrentJob->ID);
 	pthread_mutex_unlock(&JobMutex);
 	
 	if (MTInfo->PlatformContext) {
+		MTInfo->AlgoCtx.Nonce = StartNonce;
 		err = XMRSetKernelArgs(&MTInfo->AlgoCtx, TmpWork, Target);
 		if(err) return(NULL);
 	} else {
@@ -1039,22 +1041,20 @@ void *MinerThreadProc(void *Info)
 		// off the new job information.
 		// If JobID is the same as the current job ID, go hash.
 		pthread_mutex_lock(&JobMutex);
-		if(strcmp(JobID, CurrentJob.ID))
+		if(MyJobIdx != JobIdx)
 		{
 			if (MTInfo->PlatformContext)
 				Log(LOG_DEBUG, "Thread %d, GPU ID %d, GPU Type: %s: Detected new job, regenerating work.", MTInfo->ThreadID, *MTInfo->AlgoCtx.GPUIdxs, MTInfo->PlatformContext->Devices[*MTInfo->AlgoCtx.GPUIdxs].DeviceName);
 			else
 				Log(LOG_DEBUG, "Thread %d, (CPU): Detected new job, regenerating work.", MTInfo->ThreadID);
-			free(JobID);
-			
-			JobID = strdup(CurrentJob.ID);
-			MTInfo->AlgoCtx.Nonce = StartNonce;
-			
-			memcpy(TmpWork, CurrentJob.XMRBlob, sizeof(CurrentJob.XMRBlob));
-			Target = CurrentJob.XMRTarget;
+			MyJobIdx = JobIdx;
+			memcpy(TmpWork, CurrentJob->XMRBlob, sizeof(CurrentJob->XMRBlob));
+			Target = CurrentJob->XMRTarget;
+			strcpy(JobID, CurrentJob->ID);
 			pthread_mutex_unlock(&JobMutex);
 			
 			if (MTInfo->PlatformContext) {
+				MTInfo->AlgoCtx.Nonce = StartNonce;
 				err = XMRSetKernelArgs(&MTInfo->AlgoCtx, TmpWork, Target);
 				if(err) return(NULL);
 			} else {
@@ -1091,13 +1091,12 @@ void *MinerThreadProc(void *Info)
 				{
 					Log(LOG_DEBUG, "Thread %d, GPU ID %d, GPU Type: %s: SHARE found (nonce 0x%.8X)!", MTInfo->ThreadID, *MTInfo->AlgoCtx.GPUIdxs, MTInfo->PlatformContext->Devices[*MTInfo->AlgoCtx.GPUIdxs].DeviceName, Results[i]);
 
-					Share *NewShare = (Share *)malloc(sizeof(Share)+strlen(JobID)+1);
+					Share *NewShare = (Share *)malloc(sizeof(Share));
 
 					NewShare->Nonce = Results[i];
 					NewShare->Gothash = 0;
 					memcpy(NewShare->Blob, TmpWork, sizeof(NewShare->Blob));
 					NewShare->next = NULL;
-					NewShare->ID = (char *)(NewShare+1);
 					strcpy(NewShare->ID, JobID);
 
 					pthread_mutex_lock(&QueueMutex);
@@ -1123,13 +1122,12 @@ again:
 			hashes_done = n - first_nonce + 1;
 			if (found) {
 				Log(LOG_DEBUG, "Thread %d, (CPU): SHARE found (nonce 0x%.8X)!", MTInfo->ThreadID, *nonceptr);
-				Share *NewShare = (Share *)malloc(sizeof(Share)+strlen(JobID)+1);
+				Share *NewShare = (Share *)malloc(sizeof(Share));
 				
 				NewShare->Nonce = *nonceptr;
 				NewShare->Gothash = 1;
 				memcpy(NewShare->Blob, hash, 32);
 				NewShare->next = NULL;
-				NewShare->ID = (char *)(NewShare+1);
 				strcpy(NewShare->ID, JobID);
 				
 				pthread_mutex_lock(&QueueMutex);
@@ -1161,7 +1159,6 @@ again:
 			Log(LOG_INFO, "Thread %d, (CPU): %.02fH/s", MTInfo->ThreadID, hashes_done / (Seconds));
 	}
 	
-	free(JobID);
 	if (MTInfo->PlatformContext)
 		XMRCleanup(&MTInfo->AlgoCtx);
 	
@@ -1172,23 +1169,17 @@ again:
 
 void SigHandler(int signal)
 {
-	pthread_mutex_lock(&Mutex);
-	
+	char c;
 	ExitFlag = true;
-	
-	pthread_mutex_unlock(&Mutex);
+	write(ExitPipe[1], &c, 1);
 }
 
 #else
 
 BOOL SigHandler(DWORD signal)
 {
-	pthread_mutex_lock(&Mutex);
-	
 	ExitFlag = true;
-	
-	pthread_mutex_unlock(&Mutex);
-	
+
 	return(TRUE);
 }
 
@@ -1493,6 +1484,7 @@ int main(int argc, char **argv)
 	
 	#ifdef __linux__
 	
+	pipe(ExitPipe);
 	struct sigaction ExitHandler;
 	memset(&ExitHandler, 0, sizeof(struct sigaction));
 	ExitHandler.sa_handler = SigHandler;
@@ -1542,7 +1534,6 @@ int main(int argc, char **argv)
 	
 	
 	// DO NOT FORGET THIS
-	CurrentJob.Initialized = false;
 	CurrentQueue.first = CurrentQueue.last = NULL;
 	
 	Pool.StrippedURL = strdup(StrippedPoolURL);
@@ -1698,7 +1689,7 @@ int main(int argc, char **argv)
 	for(;;)
 	{
 		pthread_mutex_lock(&JobMutex);
-		if(CurrentJob.Initialized) break;
+		if(CurrentJob) break;
 		pthread_mutex_unlock(&JobMutex);
 		sleep(1);
 	}
@@ -1742,7 +1733,8 @@ int main(int argc, char **argv)
 	
 	//pthread_create(&ADLThread, NULL, ADLInfoGatherThreadProc, NULL);
 	
-	while(!ExitFlag) sleep(1);
+	char c;
+	read(ExitPipe[0], &c, 1);
 	
 	//pthread_join(Stratum, NULL);
 	

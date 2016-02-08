@@ -999,6 +999,7 @@ void *MinerThreadProc(void *Info)
 	double CurrentDiff;
 	int MyJobIdx;
 	JobInfo *MyJob;
+	char ThrID[128];
 	char JobID[32];
 	uint32_t Target, TmpWork[20];
 	MinerThreadInfo *MTInfo = (MinerThreadInfo *)Info;
@@ -1007,7 +1008,6 @@ void *MinerThreadProc(void *Info)
 	uint32_t Nonce = StartNonce, PrevNonce, platform = 0, device = 1, CurENonce2;
 	struct cryptonight_ctx *ctx;
 	uint32_t *nonceptr = (uint32_t *)((char *)TmpWork + 39);
-	uint32_t cpu_max_nonce;
 	unsigned long hashes_done;
 	
 	// First time we're getting work, allocate JobID, and fill it
@@ -1022,9 +1022,12 @@ void *MinerThreadProc(void *Info)
 		MTInfo->AlgoCtx.Nonce = StartNonce;
 		err = XMRSetKernelArgs(&MTInfo->AlgoCtx, TmpWork, Target);
 		if(err) return(NULL);
+		sprintf(ThrID, "Thread %d, GPU ID %d, GPU Type: %s",
+			MTInfo->ThreadID, *MTInfo->AlgoCtx.GPUIdxs, MTInfo->PlatformContext->Devices[*MTInfo->AlgoCtx.GPUIdxs].DeviceName);
 	} else {
 		ctx = cryptonight_ctx();
 		*nonceptr = StartNonce;
+		sprintf(ThrID, "Thread %d, (CPU)", MTInfo->ThreadID);
 	}
 	
 	while(!ExitFlag)
@@ -1038,10 +1041,7 @@ void *MinerThreadProc(void *Info)
 		// If JobID is the same as the current job ID, go hash.
 		if(MyJobIdx != JobIdx)
 		{
-			if (MTInfo->PlatformContext)
-				Log(LOG_DEBUG, "Thread %d, GPU ID %d, GPU Type: %s: Detected new job, regenerating work.", MTInfo->ThreadID, *MTInfo->AlgoCtx.GPUIdxs, MTInfo->PlatformContext->Devices[*MTInfo->AlgoCtx.GPUIdxs].DeviceName);
-			else
-				Log(LOG_DEBUG, "Thread %d, (CPU): Detected new job, regenerating work.", MTInfo->ThreadID);
+			Log(LOG_DEBUG, "%s: Detected new job, regenerating work.", ThrID);
 			MyJobIdx = JobIdx;
 			MyJob = CurrentJob;
 			memcpy(TmpWork, MyJob->XMRBlob, sizeof(MyJob->XMRBlob));
@@ -1063,11 +1063,6 @@ void *MinerThreadProc(void *Info)
 		}
 		
 		PrevNonce = MTInfo->AlgoCtx.Nonce;
-		if (!MTInfo->PlatformContext) {
-			cpu_max_nonce = *nonceptr + 60;
-			if (cpu_max_nonce > MaxNonce)
-				cpu_max_nonce = MaxNonce;
-		}
 		
 		begin = MinerGetCurTime();
 		
@@ -1083,7 +1078,7 @@ void *MinerThreadProc(void *Info)
 
 				for(int i = 0; i < Results[0xFF]; ++i)
 				{
-					Log(LOG_DEBUG, "Thread %d, GPU ID %d, GPU Type: %s: SHARE found (nonce 0x%.8X)!", MTInfo->ThreadID, *MTInfo->AlgoCtx.GPUIdxs, MTInfo->PlatformContext->Devices[*MTInfo->AlgoCtx.GPUIdxs].DeviceName, Results[i]);
+					Log(LOG_DEBUG, "%s: SHARE found (nonce 0x%.8X)!", ThrID, Results[i]);
 
 					Share *NewShare = (Share *)malloc(sizeof(Share));
 
@@ -1100,8 +1095,8 @@ void *MinerThreadProc(void *Info)
 				}
 			} while(MTInfo->AlgoCtx.Nonce < (PrevNonce + 1024));
 		} else {
-			uint32_t n = *nonceptr - 1;
-			const uint32_t first_nonce = n+1;
+			const uint32_t first_nonce = *nonceptr;
+			uint32_t n = first_nonce - 1;
 			uint32_t hash[32/4] __attribute__((aligned(32)));
 			int found = 0;
 again:
@@ -1110,12 +1105,13 @@ again:
 				cryptonight_hash_ctx(hash, TmpWork, ctx);
 				if (hash[7] < Target) {
 					found = 1;
-					break;
+				} else if (atomic_load(RestartMining + MTInfo->ThreadID)) {
+					found = 2;
 				}
-			} while (n <= cpu_max_nonce && !atomic_load(RestartMining + MTInfo->ThreadID));
-			hashes_done = n - first_nonce + 1;
-			if (found) {
-				Log(LOG_DEBUG, "Thread %d, (CPU): SHARE found (nonce 0x%.8X)!", MTInfo->ThreadID, *nonceptr);
+			} while (!found && n < MaxNonce);
+			hashes_done = n - first_nonce;
+			if (found == 1) {
+				Log(LOG_DEBUG, "%s: SHARE found (nonce 0x%.8X)!", ThrID, *nonceptr);
 				Share *NewShare = (Share *)malloc(sizeof(Share));
 				
 				NewShare->Nonce = *nonceptr;
@@ -1128,12 +1124,6 @@ again:
 				SubmitShare(&CurrentQueue, NewShare);
 				pthread_cond_signal(&QueueCond);
 				pthread_mutex_unlock(&QueueMutex);
-			} else if (cpu_max_nonce < MaxNonce && hashes_done < 1000 &&
-				!atomic_load(RestartMining + MTInfo->ThreadID)){
-				cpu_max_nonce += 60;
-				if (cpu_max_nonce > MaxNonce)
-					cpu_max_nonce = MaxNonce;
-				goto again;
 			}
 		}
 		
@@ -1147,10 +1137,7 @@ again:
 		GlobalStatus.ThreadTimes[MTInfo->ThreadID] = Seconds;
 		pthread_mutex_unlock(&StatusMutex);
 		
-		if (MTInfo->PlatformContext)
-			Log(LOG_INFO, "Thread %d, GPU ID %d, GPU Type: %s: %.02fH/s", MTInfo->ThreadID, *MTInfo->AlgoCtx.GPUIdxs, MTInfo->PlatformContext->Devices[*MTInfo->AlgoCtx.GPUIdxs].DeviceName, hashes_done / (Seconds));
-		else
-			Log(LOG_INFO, "Thread %d, (CPU): %.02fH/s", MTInfo->ThreadID, hashes_done / (Seconds));
+		Log(LOG_INFO, "%s: %.02fH/s", ThrID, hashes_done / (Seconds));
 	}
 	
 	if (MTInfo->PlatformContext)

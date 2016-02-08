@@ -84,10 +84,10 @@ volatile int JobIdx;
 typedef struct _Share
 {
 	struct _Share *next;
+	JobInfo *Job;
 	uint32_t Nonce;
 	int Gothash;
-	char ID[32];
-	uint8_t Blob[76];
+	uint8_t Blob[32];
 } Share;
 
 typedef struct _ShareQueue
@@ -95,6 +95,20 @@ typedef struct _ShareQueue
 	Share *first;
 	Share *last;
 } ShareQueue;
+
+Share *ShareList;
+
+Share *GetShare()
+{
+	Share *ret;
+	if (ShareList) {
+		ret = ShareList;
+		ShareList = ret->next;
+	} else {
+		ret = malloc(sizeof(Share));
+	}
+	return ret;
+}
 
 void SubmitShare(ShareQueue *queue, Share *NewShare)
 {
@@ -113,7 +127,8 @@ Share *RemoveShare(ShareQueue *queue)
 
 void FreeShare(Share *share)
 {
-	free(share);
+	share->next = ShareList;
+	ShareList = share;
 }
 
 ShareQueue CurrentQueue;
@@ -137,8 +152,6 @@ int sendit(int fd, char *buf, int len)
 		buf += rc;
 		len -= rc;
 	} while (len > 0);
-	// Add the very important Stratum newline
-	rc = send(fd, "\n", 1, 0);
 	return rc < 1 ? -1 : 0;
 }
 
@@ -166,8 +179,8 @@ void *PoolBroadcastThreadProc(void *Info)
 			BinaryToASCIIHex(ASCIINonce, &CurShare->Nonce, 4U);
 			
 			if (!CurShare->Gothash) {
-				((uint32_t *)(CurShare->Blob + 39))[0] = CurShare->Nonce;
-				cryptonight_hash_ctx(HashResult, CurShare->Blob, c_ctx);
+				((uint32_t *)(CurShare->Job->XMRBlob + 39))[0] = CurShare->Nonce;
+				cryptonight_hash_ctx(HashResult, CurShare->Job->XMRBlob, c_ctx);
 				BinaryToASCIIHex(ASCIIResult, HashResult, 32);
 			} else {
 				BinaryToASCIIHex(ASCIIResult, CurShare->Blob, 32);
@@ -175,9 +188,10 @@ void *PoolBroadcastThreadProc(void *Info)
 			len = snprintf(s, JSON_BUF_LEN,
 			    "{\"method\": \"submit\", \"params\": {\"id\": \"%s\", "
 			    "\"job_id\": \"%s\", \"nonce\": \"%s\", \"result\": \"%s\"}, "
-			    "\"id\":1}\r\n",
-			    pbinfo->XMRAuthID, CurShare->ID, ASCIINonce, ASCIIResult);
+			    "\"id\":1}\r\n\n",
+			    pbinfo->XMRAuthID, CurShare->Job->ID, ASCIINonce, ASCIIResult);
 
+			FreeShare(CurShare);
 			pthread_mutex_lock(&StatusMutex);
 			GlobalStatus.SolvedWork++;
 			pthread_mutex_unlock(&StatusMutex);
@@ -188,7 +202,6 @@ void *PoolBroadcastThreadProc(void *Info)
 			if (ret == -1)
 				return(NULL);
 			
-			FreeShare(CurShare);			
 		}
 	}
 	pthread_mutex_unlock(&QueueMutex);
@@ -738,7 +751,7 @@ void *StratumThreadProc(void *InfoPtr)
 	
 	len = snprintf(s, JSON_BUF_LEN, "{\"method\": \"login\", \"params\": "
 		"{\"login\": \"%s\", \"pass\": \"%s\", "
-		"\"agent\": \"wolf-hyc-xmr-miner/0.1\"}, \"id\": 1}\r\n",
+		"\"agent\": \"wolf-hyc-xmr-miner/0.1\"}, \"id\": 1}\r\n\n",
 		Pool->WorkerData.User, Pool->WorkerData.Pass);
 
 	Log(LOG_NETDEBUG, "Request: %s", s);
@@ -1000,7 +1013,6 @@ void *MinerThreadProc(void *Info)
 	int MyJobIdx;
 	JobInfo *MyJob;
 	char ThrID[128];
-	char JobID[32];
 	uint32_t Target, TmpWork[20];
 	MinerThreadInfo *MTInfo = (MinerThreadInfo *)Info;
 	uint32_t StartNonce = (0xFFFFFFFFU / MTInfo->TotalMinerThreads) * MTInfo->ThreadID;
@@ -1010,13 +1022,11 @@ void *MinerThreadProc(void *Info)
 	uint32_t *nonceptr = (uint32_t *)((char *)TmpWork + 39);
 	unsigned long hashes_done;
 	
-	// First time we're getting work, allocate JobID, and fill it
-	// with the ID of the current job, then generate work. 
+	// Generate work for first run.
 	MyJobIdx = JobIdx;
 	MyJob = CurrentJob;
 	memcpy(TmpWork, MyJob->XMRBlob, sizeof(MyJob->XMRBlob));
 	Target = MyJob->XMRTarget;
-	strcpy(JobID, MyJob->ID);
 	
 	if (MTInfo->PlatformContext) {
 		MTInfo->AlgoCtx.Nonce = StartNonce;
@@ -1046,7 +1056,6 @@ void *MinerThreadProc(void *Info)
 			MyJob = CurrentJob;
 			memcpy(TmpWork, MyJob->XMRBlob, sizeof(MyJob->XMRBlob));
 			Target = MyJob->XMRTarget;
-			strcpy(JobID, MyJob->ID);
 			
 			if (MTInfo->PlatformContext) {
 				MTInfo->AlgoCtx.Nonce = StartNonce;
@@ -1080,15 +1089,13 @@ void *MinerThreadProc(void *Info)
 				{
 					Log(LOG_DEBUG, "%s: SHARE found (nonce 0x%.8X)!", ThrID, Results[i]);
 
-					Share *NewShare = (Share *)malloc(sizeof(Share));
+					pthread_mutex_lock(&QueueMutex);
+					Share *NewShare = GetShare();
 
 					NewShare->Nonce = Results[i];
 					NewShare->Gothash = 0;
-					memcpy(NewShare->Blob, TmpWork, sizeof(NewShare->Blob));
-					NewShare->next = NULL;
-					strcpy(NewShare->ID, JobID);
+					NewShare->Job = MyJob;
 
-					pthread_mutex_lock(&QueueMutex);
 					SubmitShare(&CurrentQueue, NewShare);
 					pthread_cond_signal(&QueueCond);
 					pthread_mutex_unlock(&QueueMutex);
@@ -1112,15 +1119,14 @@ again:
 			hashes_done = n - first_nonce;
 			if (found == 1) {
 				Log(LOG_DEBUG, "%s: SHARE found (nonce 0x%.8X)!", ThrID, *nonceptr);
-				Share *NewShare = (Share *)malloc(sizeof(Share));
+				pthread_mutex_lock(&QueueMutex);
+				Share *NewShare = GetShare();
 				
 				NewShare->Nonce = *nonceptr;
 				NewShare->Gothash = 1;
 				memcpy(NewShare->Blob, hash, 32);
-				NewShare->next = NULL;
-				strcpy(NewShare->ID, JobID);
+				NewShare->Job = MyJob;
 				
-				pthread_mutex_lock(&QueueMutex);
 				SubmitShare(&CurrentQueue, NewShare);
 				pthread_cond_signal(&QueueCond);
 				pthread_mutex_unlock(&QueueMutex);
@@ -1515,8 +1521,6 @@ int main(int argc, char **argv)
 	
 	
 	// DO NOT FORGET THIS
-	CurrentQueue.first = CurrentQueue.last = NULL;
-	
 	Pool.StrippedURL = strdup(StrippedPoolURL);
 	Pool.Port = strdup(TmpPort);
 	Pool.WorkerData = Settings.Workers[0];

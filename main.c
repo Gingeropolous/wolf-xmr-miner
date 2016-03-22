@@ -774,7 +774,7 @@ void *StratumThreadProc(void *InfoPtr)
 		struct timeval timeout;
 		char StratumMsg[STRATUM_MAX_MESSAGE_LEN_BYTES];
 		
-		timeout.tv_sec = 180;
+		timeout.tv_sec = 240;
 		timeout.tv_usec = 0;
 		FD_ZERO(&readfds);
 		FD_SET(poolsocket, &readfds);
@@ -798,6 +798,7 @@ retry:
 			}
 			
 			Log(LOG_NOTIFY, "Reconnected to pool... authenticating...");
+reauth:
 			
 			Log(LOG_NETDEBUG, "Request: %s", s);
 
@@ -882,8 +883,15 @@ retry:
 					}
 					else
 					{
+						char *errmsg;
 						GlobalStatus.RejectedWork++;
-						Log(LOG_INFO, "Share rejected (%s): %d/%d (%.02f%%)", json_string_value(json_object_get(err, "message")), GlobalStatus.SolvedWork - GlobalStatus.RejectedWork, GlobalStatus.SolvedWork, (double)(GlobalStatus.SolvedWork - GlobalStatus.RejectedWork) / GlobalStatus.SolvedWork * 100.0);
+						errmsg = json_string_value(json_object_get(err, "message"));
+						Log(LOG_INFO, "Share rejected (%s): %d/%d (%.02f%%)", errmsg, GlobalStatus.SolvedWork - GlobalStatus.RejectedWork, GlobalStatus.SolvedWork, (double)(GlobalStatus.SolvedWork - GlobalStatus.RejectedWork) / GlobalStatus.SolvedWork * 100.0);
+						if (!strcasecmp("Unauthenticated", errmsg)) {
+							RestartMiners(Pool);
+							pthread_mutex_unlock(&StatusMutex);
+							goto reauth;
+						}
 					}
 					
 					for(int i = 0; i < Pool->MinerThreadCount; ++i)

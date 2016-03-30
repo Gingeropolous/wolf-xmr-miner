@@ -155,10 +155,61 @@ int sendit(int fd, char *buf, int len)
 	return rc < 1 ? -1 : 0;
 }
 
+#define BIG_BUF_LEN	262144
+void *DaemonUpdateThreadProc(void *Info)
+{
+	uint64_t id = 10;
+	PoolInfo *pbinfo = (PoolInfo *)Info;
+	char s[BIG_BUF_LEN];
+	void *c_ctx = cryptonight_ctx();
+
+	pthread_mutex_lock(&QueueMutex);
+	for(;;)
+	{
+		pthread_cond_wait(&QueueCond, &QueueMutex);
+		for(Share *CurShare = RemoveShare(&CurrentQueue); CurShare; CurShare = RemoveShare(&CurrentQueue))
+		{
+			char ASCIINonce[9];
+			char *ptr;
+			int ret, len, hdrlen;
+
+			if (!CurShare->Job->blockblob)
+			{
+				sleep(1);
+				continue;
+			}
+			BinaryToASCIIHex(ASCIINonce, &CurShare->Nonce, 4U);
+			memcpy(CurShare->Job->blockblob+78, ASCIINonce, 8);
+
+			hdrlen = sprintf(s, "POST /json_rpc HTTP/1.0\r\nContent-Length: xxx\r\n\r\n");
+			ptr = s + hdrlen;
+
+			len = snprintf(ptr, BIG_BUF_LEN - hdrlen, "{\"method\": \"submitblock\", \"params\": "
+				"[\"%s\"]}", CurShare->Job->blockblob);
+			sprintf(ptr - 7, "%d", len);
+			ptr[-4] = '\r';
+
+			ret = sendit(pbinfo->sockfd, s, len + hdrlen);
+			if (ret == -1)
+				return(NULL);
+
+			free(CurShare->Job->blockblob);
+			CurShare->Job->blockblob = NULL;
+			FreeShare(CurShare);
+			pthread_mutex_lock(&StatusMutex);
+			GlobalStatus.SolvedWork++;
+			pthread_mutex_unlock(&StatusMutex);
+
+			Log(LOG_NETDEBUG, "Request: %s", s);
+		}
+	}
+	pthread_mutex_unlock(&QueueMutex);
+	// free(c_ctx);
+	return(NULL);
+}
+
 #define JSON_BUF_LEN	345
 
-// WARNING/TODO/FIXME: ID needs to be a global counter with atomic accesses
-// TODO/FIXME: Check various calls for error
 void *PoolBroadcastThreadProc(void *Info)
 {
 	uint64_t id = 10;
@@ -732,6 +783,185 @@ static void RestartMiners(PoolInfo *Pool)
 {
 	for(int i = 0; i < Pool->MinerThreadCount; ++i)
 		atomic_store(RestartMining + i, true);
+}
+
+void *DaemonThreadProc(void *InfoPtr)
+{
+	uint64_t id = 1;
+	JobInfo *NextJob;
+	char *workerinfo[3];
+	int poolsocket, bytes, ret;
+	size_t PartialMessageOffset;
+	char rawresponse[BIG_BUF_LEN];
+	PoolInfo *Pool = (PoolInfo *)InfoPtr;
+	bool GotSubscriptionResponse = false, GotFirstJob = false;
+	char s[JSON_BUF_LEN], *ptr;
+	int len;
+	int hdrlen, rlen = 0;
+	uint64_t height, prevheight = 0;
+
+	poolsocket = Pool->sockfd;
+
+	hdrlen = sprintf(s, "POST /json_rpc HTTP/1.0\r\nContent-Length: xxx\r\n\r\n");
+	ptr = s + hdrlen;
+
+	len = snprintf(ptr, JSON_BUF_LEN - hdrlen, "{\"method\": \"getblocktemplate\", \"params\": "
+		"{\"wallet_address\": \"%s\", \"reserve_size\": 8}}",
+		Pool->WorkerData.User);
+	if (len > 999)
+		return(NULL);
+	sprintf(ptr - 7, "%d", len);
+	ptr[-4] = '\r';
+
+	ret = sendit(Pool->sockfd, s, len + hdrlen);
+	if (ret == -1)
+		return(NULL);
+
+	PartialMessageOffset = 0;
+
+	NextJob = &Jobs[0];
+
+	// Listen for work until termination.
+	for(;;)
+	{
+		uint32_t bufidx;
+		char StratumMsg[STRATUM_MAX_MESSAGE_LEN_BYTES];
+		int mlen;
+		char *l, *crlf, *tmsg;
+
+		// receive
+		ret = recv(poolsocket, rawresponse + PartialMessageOffset, 256, 0);
+		if (ret < 0)
+		{
+fail:
+			closesocket(poolsocket);
+			RestartMiners(Pool);
+retry:
+			poolsocket = Pool->sockfd = ConnectToPool(Pool->StrippedURL, Pool->Port);
+
+			if(poolsocket == INVALID_SOCKET)
+			{
+				Log(LOG_ERROR, "Unable to reconnect to daemon. Sleeping 10 seconds...\n");
+				sleep(10);
+				goto retry;
+			}
+			len = snprintf(ptr, JSON_BUF_LEN, "{\"method\": \"getblocktemplate\", \"params\": "
+				"{\"wallet_address\": \"%s\", \"reserve_size\": 8}}",
+				Pool->WorkerData.User);
+			sprintf(ptr - 7, "%d", len);
+			ptr[-4] = '\r';
+
+			ret = sendit(Pool->sockfd, s, len + hdrlen);
+			if (ret == -1)
+				return(NULL);
+
+			PartialMessageOffset = 0;
+			continue;
+		}
+		PartialMessageOffset += ret;
+		rawresponse[PartialMessageOffset] = 0x00;
+		l = strstr(rawresponse, "Content-Length: ");
+		if (!l)
+			continue;
+
+		crlf = strstr(l, "\r\n\r\n");
+		if (!crlf)
+			continue;
+
+		if (sscanf(l + sizeof("Content-Length:"), "%d", &rlen) != 1)
+		{
+			goto fail;
+		}
+		mlen = PartialMessageOffset - (crlf - rawresponse) - 4;
+		tmsg = crlf + 4;
+		tmsg[rlen] = 0;
+		mlen = rlen - mlen;
+		if (mlen)
+		{
+			ret = recv(poolsocket, rawresponse + PartialMessageOffset, mlen, 0);
+			if (ret < 0)
+				goto fail;
+			PartialMessageOffset += ret;
+			if (ret < mlen)
+				continue;
+		}
+
+		PartialMessageOffset = 0;
+		json_t *msg, *result, *err, *jheight;
+		double TotalHashrate = 0;
+
+		Log(LOG_NETDEBUG, "Got something: %s", tmsg);
+		msg = json_loads(tmsg, 0, NULL);
+		if(!msg)
+		{
+			Log(LOG_CRITICAL, "Error parsing JSON from daemon.");
+			closesocket(poolsocket);
+			return(NULL);
+		}
+		result = json_object_get(msg, "result");
+		err = json_object_get(msg, "error");
+		if (result)
+			jheight = json_object_get(result, "height");
+		if (result && jheight)
+		{
+			height = json_integer_value(jheight);
+			if (height != prevheight)
+			{
+				char *tmpl = json_string_value(json_object_get(result, "blocktemplate_blob"));
+				char *hasher = json_string_value(json_object_get(result, "blockhashing_blob"));
+				uint64_t diff = json_integer_value(json_object_get(result, "difficulty"));
+				ASCIIHexToBinary(NextJob->XMRBlob, hasher, strlen(hasher));
+				Log(LOG_NOTIFY, "New block at diff %lu", diff);
+				diff = 0xffffffffffffffffUL / diff;
+				NextJob->XMRTarget = diff >> 32;
+				NextJob->blockblob = strdup(tmpl);
+				CurrentJob = NextJob;
+				prevheight = height;
+				JobIdx++;
+				NextJob = &Jobs[JobIdx&1];
+				RestartMiners(Pool);
+			}
+			struct timeval timeout;
+			timeout.tv_sec = 1;
+			timeout.tv_usec = 0;
+			fd_set readfds;
+			FD_ZERO(&readfds);
+			FD_SET(poolsocket, &readfds);
+			select(poolsocket + 1, &readfds, NULL, NULL, &timeout);
+			if(FD_ISSET(poolsocket, &readfds))
+				continue;
+		} else {
+			pthread_mutex_lock(&StatusMutex);
+
+			if(!err && !strcmp(json_string_value(json_object_get(result, "status")), "OK"))
+			{
+				Log(LOG_INFO, "Block accepted: %d/%d (%.02f%%)", GlobalStatus.SolvedWork - GlobalStatus.RejectedWork, GlobalStatus.SolvedWork, (double)(GlobalStatus.SolvedWork - GlobalStatus.RejectedWork) / GlobalStatus.SolvedWork * 100.0);
+			}
+			else
+			{
+				char *errmsg;
+				GlobalStatus.RejectedWork++;
+				errmsg = json_string_value(json_object_get(err, "message"));
+				Log(LOG_INFO, "Block rejected (%s): %d/%d (%.02f%%)", errmsg, GlobalStatus.SolvedWork - GlobalStatus.RejectedWork, GlobalStatus.SolvedWork, (double)(GlobalStatus.SolvedWork - GlobalStatus.RejectedWork) / GlobalStatus.SolvedWork * 100.0);
+				if (!JobIdx)
+					return(NULL);
+			}
+
+			for(int i = 0; i < Pool->MinerThreadCount; ++i)
+			{
+				TotalHashrate += GlobalStatus.ThreadHashCounts[i] / GlobalStatus.ThreadTimes[i];
+			}
+
+			Log(LOG_INFO, "Total Hashrate: %.02fH/s\n", TotalHashrate);
+
+			pthread_mutex_unlock(&StatusMutex);
+		}
+
+		json_decref(msg);
+		ret = sendit(Pool->sockfd, s, len + hdrlen);
+		if (ret == -1)
+			return(NULL);
+	}
 }
 
 void *StratumThreadProc(void *InfoPtr)
@@ -1453,6 +1683,7 @@ int main(int argc, char **argv)
 	pthread_t Stratum, ADLThread, BroadcastThread, *MinerWorker;
 	unsigned int tmp1, tmp2, tmp3, tmp4;
 	int use_aesni = 0;
+	int daemon = 0;
 	
 	InitLogging(LOG_INFO);
 	
@@ -1500,6 +1731,11 @@ int main(int argc, char **argv)
 	
 	if(strstr(Settings.PoolURLs[0], "stratum+tcp://"))
 		URLOffset = strlen("stratum+tcp://");
+	else if(strstr(Settings.PoolURLs[0], "daemon+tcp://"))
+	{
+		URLOffset = strlen("daemon+tcp://");
+		daemon = 1;
+	}
 	else
 		URLOffset = 0;
 	
@@ -1667,6 +1903,18 @@ int main(int argc, char **argv)
 	}
 	Pool.sockfd = poolsocket;
 
+	if (daemon)
+	{
+	Log(LOG_NOTIFY, "Successfully connected to daemon.");
+
+	ret = pthread_create(&Stratum, NULL, DaemonThreadProc, (void *)&Pool);
+	if(ret)
+	{
+		printf("Failed to create Stratum thread.\n");
+		return(0);
+	}
+	} else
+	{
 	Log(LOG_NOTIFY, "Successfully connected to pool's stratum.");
 
 	ret = pthread_create(&Stratum, NULL, StratumThreadProc, (void *)&Pool);
@@ -1674,6 +1922,7 @@ int main(int argc, char **argv)
 	{
 		printf("Failed to create Stratum thread.\n");
 		return(0);
+	}
 	}
 
 	// Wait until we've gotten work and filled
@@ -1686,7 +1935,13 @@ int main(int argc, char **argv)
 	}
 	
 	// Work is ready - time to create the broadcast and miner threads
+	if (daemon)
+	{
+	pthread_create(&BroadcastThread, NULL, DaemonUpdateThreadProc, (void *)&Pool);
+	} else
+	{
 	pthread_create(&BroadcastThread, NULL, PoolBroadcastThreadProc, (void *)&Pool);
+	}
 	
 	for(int i = 0; i < Settings.TotalThreads; ++i)
 	{
@@ -1732,7 +1987,8 @@ int main(int argc, char **argv)
 	
 	for(int i = 0; i < Settings.TotalThreads; ++i) pthread_cancel(MinerWorker[i]);
 	
-	ReleaseOpenCLPlatformContext(&PlatformContext);
+	if (numGPUs)
+		ReleaseOpenCLPlatformContext(&PlatformContext);
 	
 	//ADLRelease();
 	

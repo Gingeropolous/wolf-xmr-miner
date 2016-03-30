@@ -18,3 +18,7 @@ total number of threads you're using, as root.
 	sudo sysctl -w vm.nr_hugepages=num
 
 Also, it can run faster as root, which allows it to use mlock.
+
+.... Solo mining:
+
+Use a URL of "daemon+tcp://<host>:<port>" - requires bitmonerod v0.9.3.1 or newer

@@ -237,10 +237,10 @@ void *PoolBroadcastThreadProc(void *Info)
 				BinaryToASCIIHex(ASCIIResult, CurShare->Blob, 32);
 			}
 			len = snprintf(s, JSON_BUF_LEN,
-			    "{\"method\": \"submit\", \"params\": {\"id\": \"%s\", "
-			    "\"job_id\": \"%s\", \"nonce\": \"%s\", \"result\": \"%s\"}, "
-			    "\"id\":1}\r\n\n",
-			    pbinfo->XMRAuthID, CurShare->Job->ID, ASCIINonce, ASCIIResult);
+				"{\"method\": \"submit\", \"params\": {\"id\": \"%s\", "
+				"\"job_id\": \"%s\", \"nonce\": \"%s\", \"result\": \"%s\"}, "
+				"\"id\":1}\r\n\n",
+				pbinfo->XMRAuthID, CurShare->Job->ID, ASCIINonce, ASCIIResult);
 
 			FreeShare(CurShare);
 			pthread_mutex_lock(&StatusMutex);
@@ -785,49 +785,51 @@ static void RestartMiners(PoolInfo *Pool)
 		atomic_store(RestartMining + i, true);
 }
 
+static const char getblkc[] = "POST /json_rpc HTTP/1.0\r\nContent-Length: 27\r\n\r\n"
+	"{\"method\": \"getblockcount\"}";
+
+#define WALLETLEN	95
+
+static char getblkt[] = "POST /json_rpc HTTP/1.0\r\nContent-Length: 178\r\n\r\n"
+	"{\"method\": \"getblocktemplate\", \"params\": {\"reserve_size\": 8, \"wallet_address\": "
+	"\"9xaXMreKDK7bctpHtTE9zUUTgffkRvwZJ7UvyJGAQHkvBFqUYWwhVWWendW6NAdvtB8nn883WQxtU7cpe5eyJiUxLZ741t5\"}}";
+
 void *DaemonThreadProc(void *InfoPtr)
 {
-	uint64_t id = 1;
+	PoolInfo *Pool = (PoolInfo *)InfoPtr;
 	JobInfo *NextJob;
-	char *workerinfo[3];
-	int poolsocket, bytes, ret;
+	char *l, *crlf;
+	int poolsocket, ret;
 	size_t PartialMessageOffset;
 	char rawresponse[BIG_BUF_LEN];
-	PoolInfo *Pool = (PoolInfo *)InfoPtr;
-	bool GotSubscriptionResponse = false, GotFirstJob = false;
-	char s[JSON_BUF_LEN], *ptr;
-	int len;
-	int hdrlen, rlen = 0;
+	int len, delay = 32;
+	int rlen;
 	uint64_t height, prevheight = 0;
 
 	poolsocket = Pool->sockfd;
 
-	hdrlen = sprintf(s, "POST /json_rpc HTTP/1.0\r\nContent-Length: xxx\r\n\r\n");
-	ptr = s + hdrlen;
-
-	len = snprintf(ptr, JSON_BUF_LEN - hdrlen, "{\"method\": \"getblocktemplate\", \"params\": "
-		"{\"wallet_address\": \"%s\", \"reserve_size\": 8}}",
-		Pool->WorkerData.User);
-	if (len > 999)
+	if (strlen(Pool->WorkerData.User) != WALLETLEN)
+	{
+		Log(LOG_ERROR, "Invalid username / wallet address\n");
 		return(NULL);
-	sprintf(ptr - 7, "%d", len);
-	ptr[-4] = '\r';
+	}
+	memcpy(getblkt+128, Pool->WorkerData.User, WALLETLEN);
 
-	ret = sendit(Pool->sockfd, s, len + hdrlen);
+	ret = sendit(poolsocket, (char *)getblkt, sizeof(getblkt)-1);
 	if (ret == -1)
 		return(NULL);
 
-	PartialMessageOffset = 0;
-
 	NextJob = &Jobs[0];
+	PartialMessageOffset = 0;
+	l = NULL;
+	crlf = NULL;
+	rlen = 0;
 
 	// Listen for work until termination.
 	for(;;)
 	{
-		uint32_t bufidx;
-		char StratumMsg[STRATUM_MAX_MESSAGE_LEN_BYTES];
+		char *tmsg;
 		int mlen;
-		char *l, *crlf, *tmsg;
 
 		// receive
 		ret = recv(poolsocket, rawresponse + PartialMessageOffset, 256, 0);
@@ -845,36 +847,43 @@ retry:
 				sleep(10);
 				goto retry;
 			}
-			len = snprintf(ptr, JSON_BUF_LEN, "{\"method\": \"getblocktemplate\", \"params\": "
-				"{\"wallet_address\": \"%s\", \"reserve_size\": 8}}",
-				Pool->WorkerData.User);
-			sprintf(ptr - 7, "%d", len);
-			ptr[-4] = '\r';
 
-			ret = sendit(Pool->sockfd, s, len + hdrlen);
+			ret = sendit(poolsocket, (char *)getblkc, sizeof(getblkc)-1);
 			if (ret == -1)
 				return(NULL);
 
 			PartialMessageOffset = 0;
+			l = NULL;
+			crlf = NULL;
+			rlen = 0;
 			continue;
 		}
 		PartialMessageOffset += ret;
 		rawresponse[PartialMessageOffset] = 0x00;
-		l = strstr(rawresponse, "Content-Length: ");
 		if (!l)
-			continue;
-
-		crlf = strstr(l, "\r\n\r\n");
-		if (!crlf)
-			continue;
-
-		if (sscanf(l + sizeof("Content-Length:"), "%d", &rlen) != 1)
 		{
-			goto fail;
+			l = strstr(rawresponse, "Content-Length: ");
+			if (!l)
+				continue;
+		}
+
+		if (!crlf)
+		{
+			crlf = strstr(l, "\r\n\r\n");
+			if (!crlf)
+				continue;
+		}
+
+		if (!rlen)
+		{
+			if (sscanf(l + sizeof("Content-Length:"), "%d", &rlen) != 1)
+			{
+				goto fail;
+			}
+			tmsg = crlf + 4;
+			tmsg[rlen] = 0;
 		}
 		mlen = PartialMessageOffset - (crlf - rawresponse) - 4;
-		tmsg = crlf + 4;
-		tmsg[rlen] = 0;
 		mlen = rlen - mlen;
 		if (mlen)
 		{
@@ -886,8 +895,13 @@ retry:
 				continue;
 		}
 
+		// We now have a complete message
 		PartialMessageOffset = 0;
-		json_t *msg, *result, *err, *jheight;
+		l = NULL;
+		crlf = NULL;
+		rlen = 0;
+
+		json_t *msg, *result, *err;
 		double TotalHashrate = 0;
 
 		Log(LOG_NETDEBUG, "Got something: %s", tmsg);
@@ -899,16 +913,27 @@ retry:
 			return(NULL);
 		}
 		result = json_object_get(msg, "result");
-		err = json_object_get(msg, "error");
 		if (result)
-			jheight = json_object_get(result, "height");
-		if (result && jheight)
 		{
-			height = json_integer_value(jheight);
-			if (height != prevheight)
+			json_t *jcount, *jheight;
+			if ((jcount = json_object_get(result, "count")))
 			{
-				char *tmpl = json_string_value(json_object_get(result, "blocktemplate_blob"));
-				char *hasher = json_string_value(json_object_get(result, "blockhashing_blob"));
+				height = json_integer_value(jcount);
+				// new height, get the block info
+				if (height != prevheight)
+				{
+					ret = sendit(poolsocket, getblkt, sizeof(getblkt)-1);
+					if (ret == -1)
+						return(NULL);
+					json_decref(msg);
+					continue;
+				}
+				// height is the same, wait and poll again
+			} else if ((jheight = json_object_get(result, "height")))
+			{
+				height = json_integer_value(jheight);
+				const char *tmpl = json_string_value(json_object_get(result, "blocktemplate_blob"));
+				const char *hasher = json_string_value(json_object_get(result, "blockhashing_blob"));
 				uint64_t diff = json_integer_value(json_object_get(result, "difficulty"));
 				ASCIIHexToBinary(NextJob->XMRBlob, hasher, strlen(hasher));
 				Log(LOG_NOTIFY, "New block at diff %lu", diff);
@@ -916,49 +941,66 @@ retry:
 				NextJob->XMRTarget = diff >> 32;
 				NextJob->blockblob = strdup(tmpl);
 				CurrentJob = NextJob;
-				prevheight = height;
 				JobIdx++;
 				NextJob = &Jobs[JobIdx&1];
 				RestartMiners(Pool);
+				// reduce polling frequency right after
+				// a new block has been announced.
+				delay = 32;
+				prevheight = height;
 			}
-			struct timeval timeout;
-			timeout.tv_sec = 1;
-			timeout.tv_usec = 0;
-			fd_set readfds;
-			FD_ZERO(&readfds);
-			FD_SET(poolsocket, &readfds);
-			select(poolsocket + 1, &readfds, NULL, NULL, &timeout);
-			if(FD_ISSET(poolsocket, &readfds))
+			if (jcount || jheight)
+			{
+				struct timeval timeout;
+				timeout.tv_sec = delay;
+				timeout.tv_usec = 0;
+				// reduce delay between polls
+				if (delay > 1)
+					delay >>= 1;
+				fd_set readfds;
+				FD_ZERO(&readfds);
+				FD_SET(poolsocket, &readfds);
+				select(poolsocket + 1, &readfds, NULL, NULL, &timeout);
+				if(!FD_ISSET(poolsocket, &readfds))
+				{
+					// reduce polling impact:
+					// getblockcount is nearly zero cost
+					ret = sendit(Pool->sockfd, (char *)getblkc, sizeof(getblkc)-1);
+					if (ret == -1)
+						return(NULL);
+				}
+				json_decref(msg);
 				continue;
-		} else {
-			pthread_mutex_lock(&StatusMutex);
-
-			if(!err && !strcmp(json_string_value(json_object_get(result, "status")), "OK"))
-			{
-				Log(LOG_INFO, "Block accepted: %d/%d (%.02f%%)", GlobalStatus.SolvedWork - GlobalStatus.RejectedWork, GlobalStatus.SolvedWork, (double)(GlobalStatus.SolvedWork - GlobalStatus.RejectedWork) / GlobalStatus.SolvedWork * 100.0);
 			}
-			else
-			{
-				char *errmsg;
-				GlobalStatus.RejectedWork++;
-				errmsg = json_string_value(json_object_get(err, "message"));
-				Log(LOG_INFO, "Block rejected (%s): %d/%d (%.02f%%)", errmsg, GlobalStatus.SolvedWork - GlobalStatus.RejectedWork, GlobalStatus.SolvedWork, (double)(GlobalStatus.SolvedWork - GlobalStatus.RejectedWork) / GlobalStatus.SolvedWork * 100.0);
-				if (!JobIdx)
-					return(NULL);
-			}
+		}
+		err = json_object_get(msg, "error");
+		pthread_mutex_lock(&StatusMutex);
 
-			for(int i = 0; i < Pool->MinerThreadCount; ++i)
-			{
-				TotalHashrate += GlobalStatus.ThreadHashCounts[i] / GlobalStatus.ThreadTimes[i];
-			}
-
-			Log(LOG_INFO, "Total Hashrate: %.02fH/s\n", TotalHashrate);
-
-			pthread_mutex_unlock(&StatusMutex);
+		if(!err && !strcmp(json_string_value(json_object_get(result, "status")), "OK"))
+		{
+			Log(LOG_INFO, "Block accepted: %d/%d (%.02f%%)", GlobalStatus.SolvedWork - GlobalStatus.RejectedWork, GlobalStatus.SolvedWork, (double)(GlobalStatus.SolvedWork - GlobalStatus.RejectedWork) / GlobalStatus.SolvedWork * 100.0);
+		}
+		else
+		{
+			const char *errmsg;
+			GlobalStatus.RejectedWork++;
+			errmsg = json_string_value(json_object_get(err, "message"));
+			Log(LOG_INFO, "Block rejected (%s): %d/%d (%.02f%%)", errmsg, GlobalStatus.SolvedWork - GlobalStatus.RejectedWork, GlobalStatus.SolvedWork, (double)(GlobalStatus.SolvedWork - GlobalStatus.RejectedWork) / GlobalStatus.SolvedWork * 100.0);
+			if (!JobIdx)
+				return(NULL);
 		}
 
+		for(int i = 0; i < Pool->MinerThreadCount; ++i)
+		{
+			TotalHashrate += GlobalStatus.ThreadHashCounts[i] / GlobalStatus.ThreadTimes[i];
+		}
+
+		Log(LOG_INFO, "Total Hashrate: %.02fH/s\n", TotalHashrate);
+
+		pthread_mutex_unlock(&StatusMutex);
+
 		json_decref(msg);
-		ret = sendit(Pool->sockfd, s, len + hdrlen);
+		ret = sendit(Pool->sockfd, (char *)getblkt, sizeof(getblkt)-1);
 		if (ret == -1)
 			return(NULL);
 	}
@@ -1113,7 +1155,7 @@ reauth:
 					}
 					else
 					{
-						char *errmsg;
+						const char *errmsg;
 						GlobalStatus.RejectedWork++;
 						errmsg = json_string_value(json_object_get(err, "message"));
 						Log(LOG_INFO, "Share rejected (%s): %d/%d (%.02f%%)", errmsg, GlobalStatus.SolvedWork - GlobalStatus.RejectedWork, GlobalStatus.SolvedWork, (double)(GlobalStatus.SolvedWork - GlobalStatus.RejectedWork) / GlobalStatus.SolvedWork * 100.0);

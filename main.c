@@ -805,6 +805,7 @@ void *DaemonThreadProc(void *InfoPtr)
 	int len, delay = 32;
 	int rlen;
 	uint64_t height, prevheight = 0;
+	time_t job_time;
 
 	poolsocket = Pool->sockfd;
 
@@ -948,6 +949,8 @@ retry:
 				// a new block has been announced.
 				delay = 32;
 				prevheight = height;
+				time(&job_time);
+				job_time += 240;
 			}
 			if (jcount || jheight)
 			{
@@ -965,7 +968,11 @@ retry:
 				{
 					// reduce polling impact:
 					// getblockcount is nearly zero cost
-					ret = sendit(Pool->sockfd, (char *)getblkc, sizeof(getblkc)-1);
+					// but get a new template if we've spent too long on this job
+					if (time(NULL) > job_time)
+						ret = sendit(Pool->sockfd, (char *)getblkt, sizeof(getblkt)-1);
+					else
+						ret = sendit(Pool->sockfd, (char *)getblkc, sizeof(getblkc)-1);
 					if (ret == -1)
 						return(NULL);
 				}
@@ -1046,7 +1053,7 @@ void *StratumThreadProc(void *InfoPtr)
 		struct timeval timeout;
 		char StratumMsg[STRATUM_MAX_MESSAGE_LEN_BYTES];
 		
-		timeout.tv_sec = 240;
+		timeout.tv_sec = 480;
 		timeout.tv_usec = 0;
 		FD_ZERO(&readfds);
 		FD_SET(poolsocket, &readfds);

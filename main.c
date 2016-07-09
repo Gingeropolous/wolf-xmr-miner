@@ -68,7 +68,7 @@ typedef struct _PoolInfo
 	WorkerInfo WorkerData;
 	uint32_t MinerThreadCount;
 	uint32_t *MinerThreads;
-	atomic_uint_least32_t StratumID;
+	atomic_uint StratumID;
 	char XMRAuthID[64];
 } PoolInfo;
 
@@ -189,13 +189,14 @@ void *DaemonUpdateThreadProc(void *Info)
 			sprintf(ptr - 7, "%d", len);
 			ptr[-4] = '\r';
 
-			ret = sendit(pbinfo->sockfd, s, len + hdrlen);
-			if (ret == -1)
-				return(NULL);
-
 			free(CurShare->Job->blockblob);
 			CurShare->Job->blockblob = NULL;
 			FreeShare(CurShare);
+
+			ret = sendit(pbinfo->sockfd, s, len + hdrlen);
+			if (ret == -1)
+				break;
+
 			pthread_mutex_lock(&StatusMutex);
 			GlobalStatus.SolvedWork++;
 			pthread_mutex_unlock(&StatusMutex);
@@ -423,7 +424,7 @@ int32_t RunXMRTest(AlgoContext *HashData, void *HashOutput)
 	cl_int retval;
 	cl_uint zero = 0;
 	size_t GlobalThreads = HashData->GlobalSize, LocalThreads = HashData->WorkSize;
-	size_t BranchNonces[4];
+	size_t BranchNonces[4] = {0};
 	
 	if(!HashData || !HashOutput) return(ERR_STUPID_PARAMS);
 	
@@ -580,7 +581,11 @@ int32_t SetupXMRTest(AlgoContext *HashData, OCLPlatform *OCL, uint32_t DeviceIdx
 	cl_int retval;
 	char *KernelSource, *BuildLog, *Options;
 	size_t GlobalThreads = OCL->Devices[DeviceIdx].rawIntensity, LocalThreads = OCL->Devices[DeviceIdx].WorkSize;
+#ifdef CL_VERSION_2_0
 	const cl_queue_properties CommandQueueProperties[] = { 0, 0, 0 };
+#else
+	const cl_command_queue_properties CommandQueueProperties = { 0 };
+#endif
 	
 	// Sanity checks
 	if(!HashData || !OCL) return(ERR_STUPID_PARAMS);
@@ -590,7 +595,12 @@ int32_t SetupXMRTest(AlgoContext *HashData, OCLPlatform *OCL, uint32_t DeviceIdx
 	
 	HashData->CommandQueues = (cl_command_queue *)malloc(sizeof(cl_command_queue));
 	
+#ifdef CL_VERSION_2_0
 	*HashData->CommandQueues = clCreateCommandQueueWithProperties(OCL->Context, OCL->Devices[DeviceIdx].DeviceID, CommandQueueProperties, &retval);
+#else
+	*HashData->CommandQueues = clCreateCommandQueue(OCL->Context, OCL->Devices[DeviceIdx].DeviceID, CommandQueueProperties, &retval);
+#endif
+
 	
 	if(retval != CL_SUCCESS)
 	{
@@ -1049,7 +1059,7 @@ void *StratumThreadProc(void *InfoPtr)
 	for(;;)
 	{
 		fd_set readfds;
-		uint32_t bufidx;
+		uint32_t bufidx, MsgLen;
 		struct timeval timeout;
 		char StratumMsg[STRATUM_MAX_MESSAGE_LEN_BYTES];
 		
@@ -1062,6 +1072,7 @@ void *StratumThreadProc(void *InfoPtr)
 		
 		if(!FD_ISSET(poolsocket, &readfds))
 		{
+retry2:
 			Log(LOG_NOTIFY, "Stratum connection to pool timed out.");
 			closesocket(poolsocket);
 			RestartMiners(Pool);
@@ -1093,6 +1104,8 @@ reauth:
 		
 		// receive
 		ret = recv(poolsocket, rawresponse + PartialMessageOffset, STRATUM_MAX_MESSAGE_LEN_BYTES - PartialMessageOffset, 0);
+		if (ret < 0)
+			goto retry2;
 		
 		rawresponse[ret] = 0x00;
 		
@@ -1103,7 +1116,7 @@ reauth:
 			json_t *msg, *msgid, *method;
 			json_error_t err;
 			
-			uint32_t MsgLen = strchr(rawresponse + bufidx, '\n') - (rawresponse + bufidx) + 1;
+			MsgLen = strchr(rawresponse + bufidx, '\n') - (rawresponse + bufidx) + 1;
 			memcpy(StratumMsg, rawresponse + bufidx, MsgLen);
 			StratumMsg[MsgLen] = 0x00;
 			
@@ -1724,7 +1737,7 @@ void FreeSettings(AlgoSettings *Settings)
 // TODO/FIXME: Check functions called for error.
 int main(int argc, char **argv)
 {
-	PoolInfo Pool;
+	PoolInfo Pool = {0};
 	AlgoSettings Settings;
 	MinerThreadInfo *MThrInfo;
 	OCLPlatform PlatformContext;
@@ -1821,8 +1834,6 @@ int main(int argc, char **argv)
 	Pool.MinerThreads = (uint32_t *)malloc(sizeof(uint32_t) * Pool.MinerThreadCount);
 	
 	for(int i = 0; i < Settings.TotalThreads; ++i) Pool.MinerThreads[i] = Settings.GPUSettings[i].Index;
-	
-	Pool.StratumID = ATOMIC_VAR_INIT(0);
 	
 	GlobalStatus.ThreadHashCounts = (double *)malloc(sizeof(double) * Settings.TotalThreads);
 	GlobalStatus.ThreadTimes = (double *)malloc(sizeof(double) * Settings.TotalThreads);

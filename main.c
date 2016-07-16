@@ -252,7 +252,7 @@ void *PoolBroadcastThreadProc(void *Info)
 			
 			ret = sendit(pbinfo->sockfd, s, len);
 			if (ret == -1)
-				return(NULL);
+				break;
 			
 		}
 	}

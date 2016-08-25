@@ -14,7 +14,7 @@ all:
 	$(CC) $(CFLAGS) crypto/c_jh.c -o crypto/c_jh.o
 	$(CC) $(CFLAGS) crypto/c_skein.c -o crypto/c_skein.o
 	$(CC) $(CFLAGS) crypto/oaes_lib.c -o crypto/oaes_lib.o
-	$(CC) $(CFLAGS) cryptonight.c -o cryptonight.o
+	$(CC) $(CFLAGS) -maes cryptonight.c -o cryptonight.o
 	$(CC) $(CFLAGS) log.c -o log.o
 	$(CC) $(CFLAGS) net.c -o net.o
 	$(CC) $(CFLAGS) minerutils.c -o minerutils.o

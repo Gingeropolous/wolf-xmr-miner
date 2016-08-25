@@ -68,6 +68,7 @@ size_t LoadTextFile(char **Output, char *Filename)
 	*Output = (char *)malloc(sizeof(char) * (len + 2));
 	len = fread(*Output, sizeof(char), len, kernel);
 	Output[0][len] = 0x00;		// NULL terminator
+	fclose(kernel);
 	
 	return(len);
 }

@@ -427,6 +427,9 @@ void cryptonight_hash_aesni(void *restrict output, const void *restrict input, s
 
 struct cryptonight_ctx* cryptonight_ctx(){
 	struct cryptonight_ctx *ret;
+#ifdef _WIN32
+	ret = calloc(1, sizeof(*ret));
+#else
 	ret = mmap(0, sizeof(*ret), PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_HUGETLB|MAP_POPULATE, 0, 0);
 	if (ret == MAP_FAILED)
 		ret = calloc(1, sizeof(*ret));
@@ -435,5 +438,6 @@ struct cryptonight_ctx* cryptonight_ctx(){
 		if (!geteuid())
 			mlock(ret, sizeof(*ret));
 	}
+#endif
 	return ret;
 }

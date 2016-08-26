@@ -97,5 +97,9 @@ int SetNonBlockingSocket(SOCKET sockfd)
 	
 	#endif
 	
+	{
+		int keepalive = 1;
+		setsockopt(sockfd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+	}
 	return(0);
 }

@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <jansson.h>
 #include <stdatomic.h>
+#include <cpuid.h>
 
 #ifdef __linux__
 
@@ -49,6 +50,8 @@ typedef struct _StatusInfo
 pthread_mutex_t StatusMutex = PTHREAD_MUTEX_INITIALIZER;
 StatusInfo GlobalStatus;
 
+static cryptonight_func *cryptonight_hash_ctx;
+
 typedef struct _WorkerInfo
 {
 	char *User;
@@ -65,24 +68,26 @@ typedef struct _PoolInfo
 	WorkerInfo WorkerData;
 	uint32_t MinerThreadCount;
 	uint32_t *MinerThreads;
-	atomic_uint_least32_t StratumID;
+	atomic_uint StratumID;
 	char XMRAuthID[64];
 } PoolInfo;
 
 atomic_bool *RestartMining;
 
-pthread_mutex_t Mutex = PTHREAD_MUTEX_INITIALIZER;
 bool ExitFlag = false;
+int ExitPipe[2];
 
-pthread_mutex_t JobMutex = PTHREAD_MUTEX_INITIALIZER;
-JobInfo CurrentJob;
+JobInfo Jobs[2];
+volatile JobInfo *CurrentJob;
+volatile int JobIdx;
 
 typedef struct _Share
 {
-	uint32_t Nonce;
-	uint8_t Blob[76];
-	char *ID;
 	struct _Share *next;
+	JobInfo *Job;
+	uint32_t Nonce;
+	int Gothash;
+	uint8_t Blob[32];
 } Share;
 
 typedef struct _ShareQueue
@@ -90,6 +95,20 @@ typedef struct _ShareQueue
 	Share *first;
 	Share *last;
 } ShareQueue;
+
+Share *ShareList;
+
+Share *GetShare()
+{
+	Share *ret;
+	if (ShareList) {
+		ret = ShareList;
+		ShareList = ret->next;
+	} else {
+		ret = malloc(sizeof(Share));
+	}
+	return ret;
+}
 
 void SubmitShare(ShareQueue *queue, Share *NewShare)
 {
@@ -108,7 +127,8 @@ Share *RemoveShare(ShareQueue *queue)
 
 void FreeShare(Share *share)
 {
-	free(share);
+	share->next = ShareList;
+	ShareList = share;
 }
 
 ShareQueue CurrentQueue;
@@ -132,20 +152,15 @@ int sendit(int fd, char *buf, int len)
 		buf += rc;
 		len -= rc;
 	} while (len > 0);
-	// Add the very important Stratum newline
-	rc = send(fd, "\n", 1, 0);
 	return rc < 1 ? -1 : 0;
 }
 
-// WARNING/TODO/FIXME: ID needs to be a global counter with atomic accesses
-// TODO/FIXME: Check various calls for error
-void *PoolBroadcastThreadProc(void *Info)
+#define BIG_BUF_LEN	262144
+void *DaemonUpdateThreadProc(void *Info)
 {
 	uint64_t id = 10;
 	PoolInfo *pbinfo = (PoolInfo *)Info;
-	pthread_mutex_lock(&QueueMutex);
-	CurrentQueue.first = CurrentQueue.last = NULL;
-	pthread_mutex_unlock(&QueueMutex);
+	char s[BIG_BUF_LEN];
 	void *c_ctx = cryptonight_ctx();
 
 	pthread_mutex_lock(&QueueMutex);
@@ -154,52 +169,95 @@ void *PoolBroadcastThreadProc(void *Info)
 		pthread_cond_wait(&QueueCond, &QueueMutex);
 		for(Share *CurShare = RemoveShare(&CurrentQueue); CurShare; CurShare = RemoveShare(&CurrentQueue))
 		{
-			uint32_t ShareNonce, ShareTime, ShareExtranonce2;
-			char ASCIINonce[9], ASCIIResult[65], *temp;
-			json_t *msg, *params;
-			uint8_t HashInput[76], HashResult[32];
-			int bytes, ret;
+			char ASCIINonce[9];
+			char *ptr;
+			int ret, len, hdrlen;
+
+			if (!CurShare->Job->blockblob)
+			{
+				sleep(1);
+				continue;
+			}
+			BinaryToASCIIHex(ASCIINonce, &CurShare->Nonce, 4U);
+			memcpy(CurShare->Job->blockblob+78, ASCIINonce, 8);
+
+			hdrlen = sprintf(s, "POST /json_rpc HTTP/1.0\r\nContent-Length: xxx\r\n\r\n");
+			ptr = s + hdrlen;
+
+			len = snprintf(ptr, BIG_BUF_LEN - hdrlen, "{\"method\": \"submitblock\", \"params\": "
+				"[\"%s\"]}", CurShare->Job->blockblob);
+			sprintf(ptr - 7, "%d", len);
+			ptr[-4] = '\r';
+
+			free(CurShare->Job->blockblob);
+			CurShare->Job->blockblob = NULL;
+			FreeShare(CurShare);
+
+			ret = sendit(pbinfo->sockfd, s, len + hdrlen);
+			if (ret == -1)
+				break;
+
+			pthread_mutex_lock(&StatusMutex);
+			GlobalStatus.SolvedWork++;
+			pthread_mutex_unlock(&StatusMutex);
+
+			Log(LOG_NETDEBUG, "Request: %s", s);
+		}
+	}
+	pthread_mutex_unlock(&QueueMutex);
+	// free(c_ctx);
+	return(NULL);
+}
+
+#define JSON_BUF_LEN	345
+
+void *PoolBroadcastThreadProc(void *Info)
+{
+	uint64_t id = 10;
+	PoolInfo *pbinfo = (PoolInfo *)Info;
+	char s[JSON_BUF_LEN];
+	void *c_ctx = cryptonight_ctx();
+
+	pthread_mutex_lock(&QueueMutex);
+	for(;;)
+	{
+		pthread_cond_wait(&QueueCond, &QueueMutex);
+		for(Share *CurShare = RemoveShare(&CurrentQueue); CurShare; CurShare = RemoveShare(&CurrentQueue))
+		{
+			char ASCIINonce[9], ASCIIResult[65];
+			uint8_t HashResult[32];
+			int ret, len;
 			
-			ShareNonce = CurShare->Nonce;
-			BinaryToASCIIHex(ASCIINonce, &ShareNonce, 4U);
+			BinaryToASCIIHex(ASCIINonce, &CurShare->Nonce, 4U);
 			
-			msg = json_object();
-			params = json_object();
-			
-			json_object_set_new(params, "id", json_string(pbinfo->XMRAuthID));
-			json_object_set_new(params, "job_id", json_string(CurShare->ID));
-			json_object_set_new(params, "nonce", json_string(ASCIINonce));
-			
-			((uint32_t *)(CurShare->Blob + 39))[0] = ShareNonce;
-			cryptonight_hash_ctx(HashResult, CurShare->Blob, c_ctx);
-			BinaryToASCIIHex(ASCIIResult, HashResult, 32);
-			
-			json_object_set_new(params, "result", json_string(ASCIIResult));
-			
-			json_object_set_new(msg, "method", json_string("submit"));
-			json_object_set_new(msg, "params", params);
-			json_object_set_new(msg, "id", json_integer(1));
-			
+			if (!CurShare->Gothash) {
+				((uint32_t *)(CurShare->Job->XMRBlob + 39))[0] = CurShare->Nonce;
+				cryptonight_hash_ctx(HashResult, CurShare->Job->XMRBlob, c_ctx);
+				BinaryToASCIIHex(ASCIIResult, HashResult, 32);
+			} else {
+				BinaryToASCIIHex(ASCIIResult, CurShare->Blob, 32);
+			}
+			len = snprintf(s, JSON_BUF_LEN,
+				"{\"method\": \"submit\", \"params\": {\"id\": \"%s\", "
+				"\"job_id\": \"%s\", \"nonce\": \"%s\", \"result\": \"%s\"}, "
+				"\"id\":1}\r\n\n",
+				pbinfo->XMRAuthID, CurShare->Job->ID, ASCIINonce, ASCIIResult);
+
+			FreeShare(CurShare);
 			pthread_mutex_lock(&StatusMutex);
 			GlobalStatus.SolvedWork++;
 			pthread_mutex_unlock(&StatusMutex);
 			
-			temp = json_dumps(msg, JSON_PRESERVE_ORDER);
-			Log(LOG_NETDEBUG, "Request: %s\n", temp);
+			Log(LOG_NETDEBUG, "Request: %s", s);
 			
-			// No longer needed
-			json_decref(msg);
-
-			ret = sendit(pbinfo->sockfd, temp, strlen(temp));
-			free(temp);
+			ret = sendit(pbinfo->sockfd, s, len);
 			if (ret == -1)
-				return(NULL);
+				break;
 			
-			FreeShare(CurShare);			
 		}
 	}
 	pthread_mutex_unlock(&QueueMutex);
-	free(c_ctx);
+	// free(c_ctx);
 	return(NULL);
 }
 
@@ -366,7 +424,7 @@ int32_t RunXMRTest(AlgoContext *HashData, void *HashOutput)
 	cl_int retval;
 	cl_uint zero = 0;
 	size_t GlobalThreads = HashData->GlobalSize, LocalThreads = HashData->WorkSize;
-	size_t BranchNonces[4];
+	size_t BranchNonces[4] = {0};
 	
 	if(!HashData || !HashOutput) return(ERR_STUPID_PARAMS);
 	
@@ -523,7 +581,11 @@ int32_t SetupXMRTest(AlgoContext *HashData, OCLPlatform *OCL, uint32_t DeviceIdx
 	cl_int retval;
 	char *KernelSource, *BuildLog, *Options;
 	size_t GlobalThreads = OCL->Devices[DeviceIdx].rawIntensity, LocalThreads = OCL->Devices[DeviceIdx].WorkSize;
+#ifdef CL_VERSION_2_0
 	const cl_queue_properties CommandQueueProperties[] = { 0, 0, 0 };
+#else
+	const cl_command_queue_properties CommandQueueProperties = { 0 };
+#endif
 	
 	// Sanity checks
 	if(!HashData || !OCL) return(ERR_STUPID_PARAMS);
@@ -533,7 +595,12 @@ int32_t SetupXMRTest(AlgoContext *HashData, OCLPlatform *OCL, uint32_t DeviceIdx
 	
 	HashData->CommandQueues = (cl_command_queue *)malloc(sizeof(cl_command_queue));
 	
+#ifdef CL_VERSION_2_0
 	*HashData->CommandQueues = clCreateCommandQueueWithProperties(OCL->Context, OCL->Devices[DeviceIdx].DeviceID, CommandQueueProperties, &retval);
+#else
+	*HashData->CommandQueues = clCreateCommandQueue(OCL->Context, OCL->Devices[DeviceIdx].DeviceID, CommandQueueProperties, &retval);
+#endif
+
 	
 	if(retval != CL_SUCCESS)
 	{
@@ -722,56 +789,281 @@ int32_t SetupXMRTest(AlgoContext *HashData, OCLPlatform *OCL, uint32_t DeviceIdx
 	return(ERR_SUCCESS);
 }
 
+static void RestartMiners(PoolInfo *Pool)
+{
+	for(int i = 0; i < Pool->MinerThreadCount; ++i)
+		atomic_store(RestartMining + i, true);
+}
+
+static const char getblkc[] = "POST /json_rpc HTTP/1.0\r\nContent-Length: 27\r\n\r\n"
+	"{\"method\": \"getblockcount\"}";
+
+#define WALLETLEN	95
+
+static char getblkt[] = "POST /json_rpc HTTP/1.0\r\nContent-Length: 178\r\n\r\n"
+	"{\"method\": \"getblocktemplate\", \"params\": {\"reserve_size\": 8, \"wallet_address\": "
+	"\"9xaXMreKDK7bctpHtTE9zUUTgffkRvwZJ7UvyJGAQHkvBFqUYWwhVWWendW6NAdvtB8nn883WQxtU7cpe5eyJiUxLZ741t5\"}}";
+
+void *DaemonThreadProc(void *InfoPtr)
+{
+	PoolInfo *Pool = (PoolInfo *)InfoPtr;
+	JobInfo *NextJob;
+	char *l, *crlf;
+	int poolsocket, ret;
+	size_t PartialMessageOffset;
+	char rawresponse[BIG_BUF_LEN];
+	int len, delay = 32;
+	int rlen;
+	uint64_t height, prevheight = 0;
+	time_t job_time;
+
+	poolsocket = Pool->sockfd;
+
+	if (strlen(Pool->WorkerData.User) != WALLETLEN)
+	{
+		Log(LOG_ERROR, "Invalid username / wallet address\n");
+		return(NULL);
+	}
+	memcpy(getblkt+128, Pool->WorkerData.User, WALLETLEN);
+
+	ret = sendit(poolsocket, (char *)getblkt, sizeof(getblkt)-1);
+	if (ret == -1)
+		return(NULL);
+
+	NextJob = &Jobs[0];
+	PartialMessageOffset = 0;
+	l = NULL;
+	crlf = NULL;
+	rlen = 0;
+
+	// Listen for work until termination.
+	for(;;)
+	{
+		char *tmsg;
+		int mlen;
+
+		// receive
+		ret = recv(poolsocket, rawresponse + PartialMessageOffset, 256, 0);
+		if (ret < 0)
+		{
+fail:
+			closesocket(poolsocket);
+			RestartMiners(Pool);
+retry:
+			poolsocket = Pool->sockfd = ConnectToPool(Pool->StrippedURL, Pool->Port);
+
+			if(poolsocket == INVALID_SOCKET)
+			{
+				Log(LOG_ERROR, "Unable to reconnect to daemon. Sleeping 10 seconds...\n");
+				sleep(10);
+				goto retry;
+			}
+
+			ret = sendit(poolsocket, (char *)getblkc, sizeof(getblkc)-1);
+			if (ret == -1)
+				return(NULL);
+
+			PartialMessageOffset = 0;
+			l = NULL;
+			crlf = NULL;
+			rlen = 0;
+			continue;
+		}
+		PartialMessageOffset += ret;
+		rawresponse[PartialMessageOffset] = 0x00;
+		if (!l)
+		{
+			l = strstr(rawresponse, "Content-Length: ");
+			if (!l)
+				continue;
+		}
+
+		if (!crlf)
+		{
+			crlf = strstr(l, "\r\n\r\n");
+			if (!crlf)
+				continue;
+		}
+
+		if (!rlen)
+		{
+			if (sscanf(l + sizeof("Content-Length:"), "%d", &rlen) != 1)
+			{
+				goto fail;
+			}
+			tmsg = crlf + 4;
+			tmsg[rlen] = 0;
+		}
+		mlen = PartialMessageOffset - (crlf - rawresponse) - 4;
+		mlen = rlen - mlen;
+		if (mlen)
+		{
+			ret = recv(poolsocket, rawresponse + PartialMessageOffset, mlen, 0);
+			if (ret < 0)
+				goto fail;
+			PartialMessageOffset += ret;
+			if (ret < mlen)
+				continue;
+		}
+
+		// We now have a complete message
+		PartialMessageOffset = 0;
+		l = NULL;
+		crlf = NULL;
+		rlen = 0;
+
+		json_t *msg, *result, *err;
+		double TotalHashrate = 0;
+
+		Log(LOG_NETDEBUG, "Got something: %s", tmsg);
+		msg = json_loads(tmsg, 0, NULL);
+		if(!msg)
+		{
+			Log(LOG_CRITICAL, "Error parsing JSON from daemon.");
+			closesocket(poolsocket);
+			return(NULL);
+		}
+		result = json_object_get(msg, "result");
+		if (result)
+		{
+			json_t *jcount, *jheight;
+			if ((jcount = json_object_get(result, "count")))
+			{
+				height = json_integer_value(jcount);
+				// new height, get the block info
+				if (height != prevheight)
+				{
+					ret = sendit(poolsocket, getblkt, sizeof(getblkt)-1);
+					if (ret == -1)
+						return(NULL);
+					json_decref(msg);
+					continue;
+				}
+				// height is the same, wait and poll again
+			} else if ((jheight = json_object_get(result, "height")))
+			{
+				height = json_integer_value(jheight);
+				const char *tmpl = json_string_value(json_object_get(result, "blocktemplate_blob"));
+				const char *hasher = json_string_value(json_object_get(result, "blockhashing_blob"));
+				uint64_t diff = json_integer_value(json_object_get(result, "difficulty"));
+				ASCIIHexToBinary(NextJob->XMRBlob, hasher, strlen(hasher));
+				Log(LOG_NOTIFY, "New block at diff %lu", diff);
+				diff = 0xffffffffffffffffUL / diff;
+				NextJob->XMRTarget = diff >> 32;
+				NextJob->blockblob = strdup(tmpl);
+				CurrentJob = NextJob;
+				JobIdx++;
+				NextJob = &Jobs[JobIdx&1];
+				RestartMiners(Pool);
+				// reduce polling frequency right after
+				// a new block has been announced.
+				delay = 32;
+				prevheight = height;
+				time(&job_time);
+				job_time += 240;
+			}
+			if (jcount || jheight)
+			{
+				struct timeval timeout;
+				timeout.tv_sec = delay;
+				timeout.tv_usec = 0;
+				// reduce delay between polls
+				if (delay > 1)
+					delay >>= 1;
+				fd_set readfds;
+				FD_ZERO(&readfds);
+				FD_SET(poolsocket, &readfds);
+				select(poolsocket + 1, &readfds, NULL, NULL, &timeout);
+				if(!FD_ISSET(poolsocket, &readfds))
+				{
+					// reduce polling impact:
+					// getblockcount is nearly zero cost
+					// but get a new template if we've spent too long on this job
+					if (time(NULL) > job_time)
+						ret = sendit(Pool->sockfd, (char *)getblkt, sizeof(getblkt)-1);
+					else
+						ret = sendit(Pool->sockfd, (char *)getblkc, sizeof(getblkc)-1);
+					if (ret == -1)
+						return(NULL);
+				}
+				json_decref(msg);
+				continue;
+			}
+		}
+		err = json_object_get(msg, "error");
+		pthread_mutex_lock(&StatusMutex);
+
+		if(!err && !strcmp(json_string_value(json_object_get(result, "status")), "OK"))
+		{
+			Log(LOG_INFO, "Block accepted: %d/%d (%.02f%%)", GlobalStatus.SolvedWork - GlobalStatus.RejectedWork, GlobalStatus.SolvedWork, (double)(GlobalStatus.SolvedWork - GlobalStatus.RejectedWork) / GlobalStatus.SolvedWork * 100.0);
+		}
+		else
+		{
+			const char *errmsg;
+			GlobalStatus.RejectedWork++;
+			errmsg = json_string_value(json_object_get(err, "message"));
+			Log(LOG_INFO, "Block rejected (%s): %d/%d (%.02f%%)", errmsg, GlobalStatus.SolvedWork - GlobalStatus.RejectedWork, GlobalStatus.SolvedWork, (double)(GlobalStatus.SolvedWork - GlobalStatus.RejectedWork) / GlobalStatus.SolvedWork * 100.0);
+			if (!JobIdx)
+				return(NULL);
+		}
+
+		for(int i = 0; i < Pool->MinerThreadCount; ++i)
+		{
+			TotalHashrate += GlobalStatus.ThreadHashCounts[i] / GlobalStatus.ThreadTimes[i];
+		}
+
+		Log(LOG_INFO, "Total Hashrate: %.02fH/s\n", TotalHashrate);
+
+		pthread_mutex_unlock(&StatusMutex);
+
+		json_decref(msg);
+		ret = sendit(Pool->sockfd, (char *)getblkt, sizeof(getblkt)-1);
+		if (ret == -1)
+			return(NULL);
+	}
+}
+
 void *StratumThreadProc(void *InfoPtr)
 {
 	uint64_t id = 1;
+	JobInfo *NextJob;
 	char *workerinfo[3];
 	int poolsocket, bytes, ret;
 	size_t PartialMessageOffset;
 	char rawresponse[STRATUM_MAX_MESSAGE_LEN_BYTES], partial[STRATUM_MAX_MESSAGE_LEN_BYTES];
 	PoolInfo *Pool = (PoolInfo *)InfoPtr;
 	bool GotSubscriptionResponse = false, GotFirstJob = false;
+	char s[JSON_BUF_LEN];
+	int len;
 	
 	poolsocket = Pool->sockfd;
 	
-	uint8_t *temp;
-	json_t *requestobj = json_object();
-	json_t *loginobj = json_object();
-	
-	json_object_set_new(loginobj, "login", json_string(Pool->WorkerData.User));
-	json_object_set_new(loginobj, "pass", json_string(Pool->WorkerData.Pass));
-	json_object_set_new(loginobj, "agent", json_string("wolf-xmr-miner/0.1"));
-	
-	// Current XMR pools are a hack job and make us hardcode an id of 1
-	json_object_set_new(requestobj, "method", json_string("login"));
-	json_object_set_new(requestobj, "params", loginobj);
-	json_object_set_new(requestobj, "id", json_integer(1));
-	
-	temp = json_dumps(requestobj, JSON_PRESERVE_ORDER);
-	Log(LOG_NETDEBUG, "Request: %s\n", temp);
-	
-	// No longer needed
-	json_decref(requestobj);
+	len = snprintf(s, JSON_BUF_LEN, "{\"method\": \"login\", \"params\": "
+		"{\"login\": \"%s\", \"pass\": \"%s\", "
+		"\"agent\": \"wolf-hyc-xmr-miner/0.1\"}, \"id\": 1}\r\n\n",
+		Pool->WorkerData.User, Pool->WorkerData.Pass);
 
-	ret = sendit(Pool->sockfd, temp, strlen(temp));
-	free(temp);
+	Log(LOG_NETDEBUG, "Request: %s", s);
+
+	ret = sendit(Pool->sockfd, s, len);
 	if (ret == -1)
 		return(NULL);
 	
-	CurrentJob.Initialized = false;
 	PartialMessageOffset = 0;
 	
 	SetNonBlockingSocket(Pool->sockfd);
 	
+	NextJob = &Jobs[0];
+
 	// Listen for work until termination.
 	for(;;)
 	{
 		fd_set readfds;
-		uint32_t bufidx;
+		uint32_t bufidx, MsgLen;
 		struct timeval timeout;
 		char StratumMsg[STRATUM_MAX_MESSAGE_LEN_BYTES];
 		
-		timeout.tv_sec = 120;
+		timeout.tv_sec = 480;
 		timeout.tv_usec = 0;
 		FD_ZERO(&readfds);
 		FD_SET(poolsocket, &readfds);
@@ -780,43 +1072,30 @@ void *StratumThreadProc(void *InfoPtr)
 		
 		if(!FD_ISSET(poolsocket, &readfds))
 		{
+retry2:
 			Log(LOG_NOTIFY, "Stratum connection to pool timed out.");
 			closesocket(poolsocket);
+			RestartMiners(Pool);
+retry:
 			poolsocket = Pool->sockfd = ConnectToPool(Pool->StrippedURL, Pool->Port);
 			
 			// TODO/FIXME: This exit is bad and should be replaced with better flow control
 			if(poolsocket == INVALID_SOCKET)
 			{
-				Log(LOG_ERROR, "Unable to reconnect to pool. We be fucked.");
-				exit(0);			
+				Log(LOG_ERROR, "Unable to reconnect to pool. Sleeping 10 seconds...\n");
+				sleep(10);
+				goto retry;
 			}
 			
 			Log(LOG_NOTIFY, "Reconnected to pool... authenticating...");
+reauth:
 			
-			requestobj = json_object();
-			loginobj = json_object();
-			
-			json_object_set_new(loginobj, "login", json_string(Pool->WorkerData.User));
-			json_object_set_new(loginobj, "pass", json_string(Pool->WorkerData.Pass));
-			json_object_set_new(loginobj, "agent", json_string("wolf-xmr-miner/0.1"));
-			
-			// Current XMR pools are a hack job and make us hardcode an id of 1
-			json_object_set_new(requestobj, "method", json_string("login"));
-			json_object_set_new(requestobj, "params", loginobj);
-			json_object_set_new(requestobj, "id", json_integer(1));
-			
-			temp = json_dumps(requestobj, JSON_PRESERVE_ORDER);
-			Log(LOG_NETDEBUG, "Request: %s\n", temp);
+			Log(LOG_NETDEBUG, "Request: %s", s);
 
-			// No longer needed
-			json_decref(requestobj);
-			
-			ret = sendit(Pool->sockfd, temp, strlen(temp));
-			free(temp);
+			ret = sendit(Pool->sockfd, s, len);
 			if (ret == -1)
 				return(NULL);
 			
-			CurrentJob.Initialized = false;
 			PartialMessageOffset = 0;
 			
 			Log(LOG_NOTIFY, "Reconnected to pool.");
@@ -825,6 +1104,8 @@ void *StratumThreadProc(void *InfoPtr)
 		
 		// receive
 		ret = recv(poolsocket, rawresponse + PartialMessageOffset, STRATUM_MAX_MESSAGE_LEN_BYTES - PartialMessageOffset, 0);
+		if (ret < 0)
+			goto retry2;
 		
 		rawresponse[ret] = 0x00;
 		
@@ -835,7 +1116,7 @@ void *StratumThreadProc(void *InfoPtr)
 			json_t *msg, *msgid, *method;
 			json_error_t err;
 			
-			uint32_t MsgLen = strchr(rawresponse + bufidx, '\n') - (rawresponse + bufidx) + 1;
+			MsgLen = strchr(rawresponse + bufidx, '\n') - (rawresponse + bufidx) + 1;
 			memcpy(StratumMsg, rawresponse + bufidx, MsgLen);
 			StratumMsg[MsgLen] = 0x00;
 			
@@ -894,8 +1175,15 @@ void *StratumThreadProc(void *InfoPtr)
 					}
 					else
 					{
+						const char *errmsg;
 						GlobalStatus.RejectedWork++;
-						Log(LOG_INFO, "Share rejected (%s): %d/%d (%.02f%%)", json_string_value(json_object_get(result, "status")), GlobalStatus.SolvedWork - GlobalStatus.RejectedWork, GlobalStatus.SolvedWork, (double)(GlobalStatus.SolvedWork - GlobalStatus.RejectedWork) / GlobalStatus.SolvedWork * 100.0);
+						errmsg = json_string_value(json_object_get(err, "message"));
+						Log(LOG_INFO, "Share rejected (%s): %d/%d (%.02f%%)", errmsg, GlobalStatus.SolvedWork - GlobalStatus.RejectedWork, GlobalStatus.SolvedWork, (double)(GlobalStatus.SolvedWork - GlobalStatus.RejectedWork) / GlobalStatus.SolvedWork * 100.0);
+						if (!strcasecmp("Unauthenticated", errmsg)) {
+							RestartMiners(Pool);
+							pthread_mutex_unlock(&StatusMutex);
+							goto reauth;
+						}
 					}
 					
 					for(int i = 0; i < Pool->MinerThreadCount; ++i)
@@ -936,13 +1224,13 @@ void *StratumThreadProc(void *InfoPtr)
 					}
 					
 					const char *val = json_string_value(blob);
-					pthread_mutex_lock(&JobMutex);
-					ASCIIHexToBinary(CurrentJob.XMRBlob, val, strlen(val));
-					free(CurrentJob.ID);
-					CurrentJob.ID = strdup(json_string_value(jid));
-					CurrentJob.XMRTarget = strtoul(json_string_value(target), NULL, 16);		// This is bad, and I feel bad
-					CurrentJob.Initialized = 1;
-					pthread_mutex_unlock(&JobMutex);
+					ASCIIHexToBinary(NextJob->XMRBlob, val, strlen(val));
+					strcpy(NextJob->ID, json_string_value(jid));
+					NextJob->XMRTarget = __builtin_bswap32(strtoul(json_string_value(target), NULL, 16));
+					CurrentJob = NextJob;
+					JobIdx++;
+					NextJob = &Jobs[JobIdx&1];
+					Log(LOG_NOTIFY, "New job at diff %g", (double)0xffffffff / CurrentJob->XMRTarget);
 				}
 				json_decref(result);
 			}
@@ -982,18 +1270,17 @@ void *StratumThreadProc(void *InfoPtr)
 					}
 					
 					const char *val = json_string_value(blob);
-					pthread_mutex_lock(&JobMutex);
-					ASCIIHexToBinary(CurrentJob.XMRBlob, val, strlen(val));
-					free(CurrentJob.ID);
-					CurrentJob.ID = strdup(json_string_value(jid));
-					CurrentJob.XMRTarget = strtoul(json_string_value(target), NULL, 16);		// This is bad, and I feel bad
-					pthread_mutex_unlock(&JobMutex);
+					ASCIIHexToBinary(NextJob->XMRBlob, val, strlen(val));
+					strcpy(NextJob->ID, json_string_value(jid));
+					NextJob->XMRTarget = __builtin_bswap32(strtoul(json_string_value(target), NULL, 16));
+					CurrentJob = NextJob;
+					JobIdx++;
+					NextJob = &Jobs[JobIdx&1];
 					
 					// No cleanjobs param, so we flush every time
-					for(int i = 0; i < Pool->MinerThreadCount; ++i)
-						atomic_store(RestartMining + i, true);
+					RestartMiners(Pool);
 						
-					Log(LOG_NOTIFY, "Pool requested miner discard all previous work - probably new block on the network.");
+					Log(LOG_NOTIFY, "New job at diff %g", (double)0xffffffff / CurrentJob->XMRTarget);
 				}	
 				else
 				{
@@ -1023,29 +1310,35 @@ void *MinerThreadProc(void *Info)
 {
 	int32_t err;
 	double CurrentDiff;
-	char *JobID = NULL;
-	uint8_t BlockHdr[128];
-	uint32_t FullTarget[8], TmpWork[20];
+	int MyJobIdx;
+	JobInfo *MyJob;
+	char ThrID[128];
+	uint32_t Target, TmpWork[20];
 	MinerThreadInfo *MTInfo = (MinerThreadInfo *)Info;
 	uint32_t StartNonce = (0xFFFFFFFFU / MTInfo->TotalMinerThreads) * MTInfo->ThreadID;
 	uint32_t MaxNonce = StartNonce + (0xFFFFFFFFU / MTInfo->TotalMinerThreads);
 	uint32_t Nonce = StartNonce, PrevNonce, platform = 0, device = 1, CurENonce2;
+	struct cryptonight_ctx *ctx;
+	uint32_t *nonceptr = (uint32_t *)((char *)TmpWork + 39);
+	unsigned long hashes_done;
 	
-	// First time we're getting work, allocate JobID, and fill it
-	// with the ID of the current job, then generate work. 
-	pthread_mutex_lock(&JobMutex);
-	JobID = strdup(CurrentJob.ID);
-	MTInfo->AlgoCtx.Nonce = StartNonce;
+	// Generate work for first run.
+	MyJobIdx = JobIdx;
+	MyJob = CurrentJob;
+	memcpy(TmpWork, MyJob->XMRBlob, sizeof(MyJob->XMRBlob));
+	Target = MyJob->XMRTarget;
 	
-	memcpy(TmpWork, CurrentJob.XMRBlob, sizeof(CurrentJob.XMRBlob));
-	memset(FullTarget, 0xFF, 32);
-	FullTarget[7] = __builtin_bswap32(CurrentJob.XMRTarget);
-	pthread_mutex_unlock(&JobMutex);
-	
-	//Log(LOG_DEBUG, "Short target: %16llX", FullTarget[7]);
-	
-	err = XMRSetKernelArgs(&MTInfo->AlgoCtx, TmpWork, FullTarget[7]);
-	if(err) return(NULL);
+	if (MTInfo->PlatformContext) {
+		MTInfo->AlgoCtx.Nonce = StartNonce;
+		err = XMRSetKernelArgs(&MTInfo->AlgoCtx, TmpWork, Target);
+		if(err) return(NULL);
+		sprintf(ThrID, "Thread %d, GPU ID %d, GPU Type: %s",
+			MTInfo->ThreadID, *MTInfo->AlgoCtx.GPUIdxs, MTInfo->PlatformContext->Devices[*MTInfo->AlgoCtx.GPUIdxs].DeviceName);
+	} else {
+		ctx = cryptonight_ctx();
+		*nonceptr = StartNonce;
+		sprintf(ThrID, "Thread %d, (CPU)", MTInfo->ThreadID);
+	}
 	
 	while(!ExitFlag)
 	{
@@ -1056,74 +1349,105 @@ void *MinerThreadProc(void *Info)
 		// If JobID is not equal to the current job ID, generate new work
 		// off the new job information.
 		// If JobID is the same as the current job ID, go hash.
-		pthread_mutex_lock(&JobMutex);
-		if(strcmp(JobID, CurrentJob.ID))
+		if(MyJobIdx != JobIdx)
 		{
-			Log(LOG_DEBUG, "Thread %d, GPU ID %d, GPU Type: %s: Detected new job, regenerating work.", MTInfo->ThreadID, *MTInfo->AlgoCtx.GPUIdxs, MTInfo->PlatformContext->Devices[*MTInfo->AlgoCtx.GPUIdxs].DeviceName);
-			free(JobID);
+			Log(LOG_DEBUG, "%s: Detected new job, regenerating work.", ThrID);
+			MyJobIdx = JobIdx;
+			MyJob = CurrentJob;
+			memcpy(TmpWork, MyJob->XMRBlob, sizeof(MyJob->XMRBlob));
+			Target = MyJob->XMRTarget;
 			
-			JobID = strdup(CurrentJob.ID);
-			MTInfo->AlgoCtx.Nonce = StartNonce;
-			
-			memcpy(TmpWork, CurrentJob.XMRBlob, sizeof(CurrentJob.XMRBlob));
-			memset(FullTarget, 0xFF, 32);
-			FullTarget[7] = __builtin_bswap32(CurrentJob.XMRTarget);
-			pthread_mutex_unlock(&JobMutex);
-			
-			err = XMRSetKernelArgs(&MTInfo->AlgoCtx, TmpWork, FullTarget[7]);
-			if(err) return(NULL);
+			if (MTInfo->PlatformContext) {
+				MTInfo->AlgoCtx.Nonce = StartNonce;
+				err = XMRSetKernelArgs(&MTInfo->AlgoCtx, TmpWork, Target);
+				if(err) return(NULL);
+			} else {
+				*nonceptr = StartNonce;
+			}
 		}
 		else
 		{
-			pthread_mutex_unlock(&JobMutex);
+			if (!MTInfo->PlatformContext)
+				++(*nonceptr);
 		}
 		
 		PrevNonce = MTInfo->AlgoCtx.Nonce;
 		
 		begin = MinerGetCurTime();
 		
-		do
-		{
-			cl_uint Results[0x100] = { 0 };
-			
-			err = RunXMRTest(&MTInfo->AlgoCtx, Results);
-			if(err) return(NULL);
-			
-			if(atomic_load(RestartMining + MTInfo->ThreadID)) break;
-			
-			for(int i = 0; i < Results[0xFF]; ++i)
+		if (MTInfo->PlatformContext) {
+			do
 			{
-				Log(LOG_DEBUG, "Thread %d, GPU ID %d, GPU Type: %s: SHARE found (nonce 0x%.8X)!", MTInfo->ThreadID, *MTInfo->AlgoCtx.GPUIdxs, MTInfo->PlatformContext->Devices[*MTInfo->AlgoCtx.GPUIdxs].DeviceName, Results[i]);
+				cl_uint Results[0x100] = { 0 };
+
+				err = RunXMRTest(&MTInfo->AlgoCtx, Results);
+				if(err) return(NULL);
 				
-				Share *NewShare = (Share *)malloc(sizeof(Share)+strlen(JobID)+1);
-				
-				NewShare->Nonce = Results[i];
-				memcpy(NewShare->Blob, TmpWork, sizeof(NewShare->Blob));
-				NewShare->next = NULL;
-				NewShare->ID = (char *)(NewShare+1);
-				strcpy(NewShare->ID, JobID);
-				
+				if(atomic_load(RestartMining + MTInfo->ThreadID)) break;
+
+				for(int i = 0; i < Results[0xFF]; ++i)
+				{
+					Log(LOG_DEBUG, "%s: SHARE found (nonce 0x%.8X)!", ThrID, Results[i]);
+
+					pthread_mutex_lock(&QueueMutex);
+					Share *NewShare = GetShare();
+
+					NewShare->Nonce = Results[i];
+					NewShare->Gothash = 0;
+					NewShare->Job = MyJob;
+
+					SubmitShare(&CurrentQueue, NewShare);
+					pthread_cond_signal(&QueueCond);
+					pthread_mutex_unlock(&QueueMutex);
+				}
+			} while(MTInfo->AlgoCtx.Nonce < (PrevNonce + 1024));
+		} else {
+			const uint32_t first_nonce = *nonceptr;
+			uint32_t n = first_nonce - 1;
+			uint32_t hash[32/4] __attribute__((aligned(32)));
+			int found = 0;
+again:
+			do {
+				*nonceptr = ++n;
+				cryptonight_hash_ctx(hash, TmpWork, ctx);
+				if (hash[7] < Target) {
+					found = 1;
+				} else if (atomic_load(RestartMining + MTInfo->ThreadID)) {
+					found = 2;
+				}
+			} while (!found && n < MaxNonce);
+			hashes_done = n - first_nonce;
+			if (found == 1) {
+				Log(LOG_DEBUG, "%s: SHARE found (nonce 0x%.8X)!", ThrID, *nonceptr);
 				pthread_mutex_lock(&QueueMutex);
+				Share *NewShare = GetShare();
+				
+				NewShare->Nonce = *nonceptr;
+				NewShare->Gothash = 1;
+				memcpy(NewShare->Blob, hash, 32);
+				NewShare->Job = MyJob;
+				
 				SubmitShare(&CurrentQueue, NewShare);
 				pthread_cond_signal(&QueueCond);
-				pthread_mutex_unlock(&QueueMutex);				
+				pthread_mutex_unlock(&QueueMutex);
 			}
-		} while(MTInfo->AlgoCtx.Nonce < (PrevNonce + 1024));
+		}
 		
 		end = MinerGetCurTime();
-		
 		double Seconds = SecondsElapsed(begin, end);
 		
 		pthread_mutex_lock(&StatusMutex);
-		GlobalStatus.ThreadHashCounts[MTInfo->ThreadID] = MTInfo->AlgoCtx.Nonce - PrevNonce;
+		if (MTInfo->PlatformContext)
+			hashes_done = MTInfo->AlgoCtx.Nonce - PrevNonce;
+		GlobalStatus.ThreadHashCounts[MTInfo->ThreadID] = hashes_done;
 		GlobalStatus.ThreadTimes[MTInfo->ThreadID] = Seconds;
 		pthread_mutex_unlock(&StatusMutex);
 		
-		Log(LOG_INFO, "Thread %d, GPU ID %d, GPU Type: %s: %.02fH/s\n", MTInfo->ThreadID, *MTInfo->AlgoCtx.GPUIdxs, MTInfo->PlatformContext->Devices[*MTInfo->AlgoCtx.GPUIdxs].DeviceName, ((MTInfo->AlgoCtx.Nonce - PrevNonce)) / (Seconds));
+		Log(LOG_INFO, "%s: %.02fH/s", ThrID, hashes_done / (Seconds));
 	}
 	
-	free(JobID);
-	XMRCleanup(&MTInfo->AlgoCtx);
+	if (MTInfo->PlatformContext)
+		XMRCleanup(&MTInfo->AlgoCtx);
 	
 	return(NULL);
 }
@@ -1132,23 +1456,17 @@ void *MinerThreadProc(void *Info)
 
 void SigHandler(int signal)
 {
-	pthread_mutex_lock(&Mutex);
-	
+	char c;
 	ExitFlag = true;
-	
-	pthread_mutex_unlock(&Mutex);
+	write(ExitPipe[1], &c, 1);
 }
 
 #else
 
 BOOL SigHandler(DWORD signal)
 {
-	pthread_mutex_lock(&Mutex);
-	
 	ExitFlag = true;
-	
-	pthread_mutex_unlock(&Mutex);
-	
+
 	return(TRUE);
 }
 
@@ -1419,14 +1737,17 @@ void FreeSettings(AlgoSettings *Settings)
 // TODO/FIXME: Check functions called for error.
 int main(int argc, char **argv)
 {
-	PoolInfo Pool;
+	PoolInfo Pool = {0};
 	AlgoSettings Settings;
 	MinerThreadInfo *MThrInfo;
 	OCLPlatform PlatformContext;
 	int ret, poolsocket, PlatformIdx = 0;
 	pthread_t Stratum, ADLThread, BroadcastThread, *MinerWorker;
+	unsigned int tmp1, tmp2, tmp3, tmp4;
+	int use_aesni = 0;
+	int daemon = 0;
 	
-	InitLogging(LOG_NETDEBUG);
+	InitLogging(LOG_INFO);
 	
 	if(argc != 2)
 	{
@@ -1436,16 +1757,28 @@ int main(int argc, char **argv)
 	
 	if(ParseConfigurationFile(argv[1], &Settings)) return(0);
 	
+	if (__get_cpuid_max(0, &tmp1) >= 1) {
+		__get_cpuid(1, &tmp1, &tmp2, &tmp3, &tmp4);
+		if (tmp3 & 0x2000000)
+			use_aesni = 1;
+	}
+	if (use_aesni)
+		cryptonight_hash_ctx = cryptonight_hash_aesni;
+	else
+		cryptonight_hash_ctx = cryptonight_hash_dumb;
+
 	MThrInfo = (MinerThreadInfo *)malloc(sizeof(MinerThreadInfo) * Settings.TotalThreads);
 	MinerWorker = (pthread_t *)malloc(sizeof(pthread_t) * Settings.TotalThreads);
 	
 	#ifdef __linux__
 	
+	pipe(ExitPipe);
 	struct sigaction ExitHandler;
 	memset(&ExitHandler, 0, sizeof(struct sigaction));
 	ExitHandler.sa_handler = SigHandler;
 	
 	sigaction(SIGINT, &ExitHandler, NULL);
+	signal(SIGPIPE, SIG_IGN);
 	
 	#else
 	
@@ -1460,6 +1793,11 @@ int main(int argc, char **argv)
 	
 	if(strstr(Settings.PoolURLs[0], "stratum+tcp://"))
 		URLOffset = strlen("stratum+tcp://");
+	else if(strstr(Settings.PoolURLs[0], "daemon+tcp://"))
+	{
+		URLOffset = strlen("daemon+tcp://");
+		daemon = 1;
+	}
 	else
 		URLOffset = 0;
 	
@@ -1487,22 +1825,8 @@ int main(int argc, char **argv)
 		return(0);
 	}
 	
-	// TODO: Have ConnectToPool() return a Pool struct
-	poolsocket = ConnectToPool(StrippedPoolURL, TmpPort);
-	
-	if(poolsocket == INVALID_SOCKET)
-	{
-		Log(LOG_CRITICAL, "Fatal error connecting to pool.");
-		return(0);
-	}
-	
-	Log(LOG_NOTIFY, "Successfully connected to pool's stratum.");
 	
 	// DO NOT FORGET THIS
-	CurrentJob.Initialized = false;
-	CurrentQueue.first = CurrentQueue.last = NULL;
-	
-	Pool.sockfd = poolsocket;
 	Pool.StrippedURL = strdup(StrippedPoolURL);
 	Pool.Port = strdup(TmpPort);
 	Pool.WorkerData = Settings.Workers[0];
@@ -1510,8 +1834,6 @@ int main(int argc, char **argv)
 	Pool.MinerThreads = (uint32_t *)malloc(sizeof(uint32_t) * Pool.MinerThreadCount);
 	
 	for(int i = 0; i < Settings.TotalThreads; ++i) Pool.MinerThreads[i] = Settings.GPUSettings[i].Index;
-	
-	Pool.StratumID = ATOMIC_VAR_INIT(0);
 	
 	GlobalStatus.ThreadHashCounts = (double *)malloc(sizeof(double) * Settings.TotalThreads);
 	GlobalStatus.ThreadTimes = (double *)malloc(sizeof(double) * Settings.TotalThreads);
@@ -1582,28 +1904,29 @@ int main(int argc, char **argv)
 	
 	for(int i = 0; i < Settings.TotalThreads; ++i) atomic_init(RestartMining + i, false);
 	
-	ret = pthread_create(&Stratum, NULL, StratumThreadProc, (void *)&Pool);
-	
-	if(ret)
-	{
-		printf("Failed to create Stratum thread.\n");
-		return(0);
-	}
-	
+	Log(LOG_NOTIFY, "Setting up GPU(s).");
+
 	// Note to self - move this list BS into the InitOpenCLPlatformContext() routine
 	uint32_t *GPUIdxList = (uint32_t *)malloc(sizeof(uint32_t) * Settings.NumGPUs);
+	uint32_t numGPUs = Settings.NumGPUs;
 	
-	for(int i = 0; i < Settings.NumGPUs; ++i) GPUIdxList[i] = Settings.GPUSettings[i].Index;
+	for(int i = 0; i < Settings.NumGPUs; ++i) {
+		GPUIdxList[i] = Settings.GPUSettings[i].Index;
+		if (Settings.GPUSettings[i].Index == -1)
+			numGPUs--;
+	}
 	
-	ret = InitOpenCLPlatformContext(&PlatformContext, PlatformIdx, Settings.NumGPUs, GPUIdxList);
-	if(ret) return(0);
-	
+	if (numGPUs) {
+		ret = InitOpenCLPlatformContext(&PlatformContext, PlatformIdx, numGPUs, GPUIdxList);
+		if(ret) return(0);
+	}
+
 	free(GPUIdxList);
 	
-	for(int i = 0; i < Settings.NumGPUs; ++i) PlatformContext.Devices[i].rawIntensity = Settings.GPUSettings[i].rawIntensity;
+	for(int i = 0; i < numGPUs; ++i) PlatformContext.Devices[i].rawIntensity = Settings.GPUSettings[i].rawIntensity;
 	
 	// Check for zero was done when parsing config
-	for(int i = 0; i < Settings.NumGPUs; ++i)
+	for(int i = 0; i < numGPUs; ++i)
 	{
 		if(Settings.GPUSettings[i].Worksize > PlatformContext.Devices[i].MaximumWorkSize)
 		{
@@ -1616,31 +1939,68 @@ int main(int argc, char **argv)
 		}
 	}
 	
+	for(int ThrIdx = 0, GPUIdx = 0; ThrIdx < Settings.TotalThreads && GPUIdx < Settings.NumGPUs; ThrIdx += Settings.GPUSettings[GPUIdx].Threads, ++GPUIdx)
+	{
+		for(int x = 0; x < Settings.GPUSettings[GPUIdx].Threads; ++x)
+		{
+			if (Settings.GPUSettings[GPUIdx].Index != -1) {
+				SetupXMRTest(&MThrInfo[ThrIdx + x].AlgoCtx, &PlatformContext, GPUIdx);
+				MThrInfo[ThrIdx + x].PlatformContext = &PlatformContext;
+			} else {
+				MThrInfo[ThrIdx + x].PlatformContext = NULL;
+			}
+			MThrInfo[ThrIdx + x].ThreadID = ThrIdx + x;
+			MThrInfo[ThrIdx + x].TotalMinerThreads = Settings.TotalThreads;
+		}
+	}
+
+	// TODO: Have ConnectToPool() return a Pool struct
+	poolsocket = ConnectToPool(StrippedPoolURL, TmpPort);
+	if(poolsocket == INVALID_SOCKET)
+	{
+		Log(LOG_CRITICAL, "Fatal error connecting to pool.");
+		return(0);
+	}
+	Pool.sockfd = poolsocket;
+
+	if (daemon)
+	{
+	Log(LOG_NOTIFY, "Successfully connected to daemon.");
+
+	ret = pthread_create(&Stratum, NULL, DaemonThreadProc, (void *)&Pool);
+	if(ret)
+	{
+		printf("Failed to create Stratum thread.\n");
+		return(0);
+	}
+	} else
+	{
+	Log(LOG_NOTIFY, "Successfully connected to pool's stratum.");
+
+	ret = pthread_create(&Stratum, NULL, StratumThreadProc, (void *)&Pool);
+	if(ret)
+	{
+		printf("Failed to create Stratum thread.\n");
+		return(0);
+	}
+	}
+
 	// Wait until we've gotten work and filled
 	// up the job structure before launching the
 	// miner worker threads.
 	for(;;)
 	{
-		pthread_mutex_lock(&JobMutex);
-		if(CurrentJob.Initialized) break;
-		pthread_mutex_unlock(&JobMutex);
+		if(CurrentJob) break;
 		sleep(1);
 	}
 	
-	pthread_mutex_unlock(&JobMutex);
-	
 	// Work is ready - time to create the broadcast and miner threads
-	pthread_create(&BroadcastThread, NULL, PoolBroadcastThreadProc, (void *)&Pool);
-	
-	for(int ThrIdx = 0, GPUIdx = 0; ThrIdx < Settings.TotalThreads && GPUIdx < Settings.NumGPUs; ThrIdx += Settings.GPUSettings[GPUIdx].Threads, ++GPUIdx)
+	if (daemon)
 	{
-		for(int x = 0; x < Settings.GPUSettings[GPUIdx].Threads; ++x)
-		{
-			SetupXMRTest(&MThrInfo[ThrIdx + x].AlgoCtx, &PlatformContext, GPUIdx);
-			MThrInfo[ThrIdx + x].ThreadID = ThrIdx + x;
-			MThrInfo[ThrIdx + x].TotalMinerThreads = Settings.TotalThreads;
-			MThrInfo[ThrIdx + x].PlatformContext = &PlatformContext;
-		}		
+	pthread_create(&BroadcastThread, NULL, DaemonUpdateThreadProc, (void *)&Pool);
+	} else
+	{
+	pthread_create(&BroadcastThread, NULL, PoolBroadcastThreadProc, (void *)&Pool);
 	}
 	
 	for(int i = 0; i < Settings.TotalThreads; ++i)
@@ -1677,7 +2037,8 @@ int main(int argc, char **argv)
 	
 	//pthread_create(&ADLThread, NULL, ADLInfoGatherThreadProc, NULL);
 	
-	while(!ExitFlag) sleep(1);
+	char c;
+	read(ExitPipe[0], &c, 1);
 	
 	//pthread_join(Stratum, NULL);
 	
@@ -1686,7 +2047,8 @@ int main(int argc, char **argv)
 	
 	for(int i = 0; i < Settings.TotalThreads; ++i) pthread_cancel(MinerWorker[i]);
 	
-	ReleaseOpenCLPlatformContext(&PlatformContext);
+	if (numGPUs)
+		ReleaseOpenCLPlatformContext(&PlatformContext);
 	
 	//ADLRelease();
 	

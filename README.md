@@ -22,3 +22,5 @@ Also, it can run faster as root, which allows it to use mlock.
 .... Solo mining:
 
 Use a URL of "daemon+tcp://<host>:<port>" - requires bitmonerod v0.9.3.1 or newer
+
+Donations accepted at: `42QWoLF7pdwMcTXDviJvNkWEHJ4TXnMBh2Cx6HNkVAW57E48Zfw6wLwDUYFDYJAqY7PLJUTz9cHWB5C4wUA7UJPu5wPf4sZ`

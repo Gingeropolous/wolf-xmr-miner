@@ -844,7 +844,7 @@ void *DaemonThreadProc(void *InfoPtr)
 
 		// receive
 		ret = recv(poolsocket, rawresponse + PartialMessageOffset, 256, 0);
-		if (ret < 0)
+		if (ret <= 0)
 		{
 fail:
 			closesocket(poolsocket);
@@ -899,7 +899,7 @@ retry:
 		if (mlen)
 		{
 			ret = recv(poolsocket, rawresponse + PartialMessageOffset, mlen, 0);
-			if (ret < 0)
+			if (ret <= 0)
 				goto fail;
 			PartialMessageOffset += ret;
 			if (ret < mlen)
@@ -973,8 +973,8 @@ retry:
 				fd_set readfds;
 				FD_ZERO(&readfds);
 				FD_SET(poolsocket, &readfds);
-				select(poolsocket + 1, &readfds, NULL, NULL, &timeout);
-				if(!FD_ISSET(poolsocket, &readfds))
+				ret = select(poolsocket + 1, &readfds, NULL, NULL, &timeout);
+				if(ret != 1 || !FD_ISSET(poolsocket, &readfds))
 				{
 					// reduce polling impact:
 					// getblockcount is nearly zero cost
@@ -1068,9 +1068,9 @@ void *StratumThreadProc(void *InfoPtr)
 		FD_ZERO(&readfds);
 		FD_SET(poolsocket, &readfds);
 		
-		select(poolsocket + 1, &readfds, NULL, NULL, &timeout);
+		ret = select(poolsocket + 1, &readfds, NULL, NULL, &timeout);
 		
-		if(!FD_ISSET(poolsocket, &readfds))
+		if(ret != 1 || !FD_ISSET(poolsocket, &readfds))
 		{
 retry2:
 			Log(LOG_NOTIFY, "Stratum connection to pool timed out.");

@@ -27,7 +27,7 @@ Use a URL of "daemon+tcp://<host>:<port>" - requires bitmonerod v0.9.3.1 or newe
 
 # Building
 
-## Ubuntu
+## Ubuntu 14.04
 
 gcc 5 or newer is required.
 

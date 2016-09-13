@@ -342,7 +342,6 @@ __kernel void cn0(__global ulong *input, __global uint4 *Scratchpad, __global ul
 	ulong State[25];
 	uint ExpandedKey1[256];
 	__local uint AES0[256], AES1[256], AES2[256], AES3[256];
-	ulong inbuf[10];
 	uint4 text;
 	
 	states += (25 * (get_global_id(0) - get_global_offset(0)));
@@ -357,20 +356,29 @@ __kernel void cn0(__global ulong *input, __global uint4 *Scratchpad, __global ul
 		AES3[i] = rotate(tmp, 24U);
 	}
 	
-	((ulong8 *)inbuf)[0] = vload8(0, input);
-	inbuf[8] = input[8];
-	inbuf[9] = (ulong)((__global uint *)input)[18];
+	((ulong8 *)State)[0] = vload8(0, input);
+	State[8] = input[8];
+	State[9] = (ulong)((__global uint *)input)[18];
 	
-	((uint *)(((uchar *)inbuf) + 39))[0] = get_global_id(0);
-	CNKeccak(State, inbuf);
+	((uint *)(((uchar *)State) + 39))[0] = get_global_id(0);
+	State[9] = (input[9] & 0x00000000FFFFFFFFUL) | 0x0000000100000000UL;
+	
+	for(int i = 10; i < 25; ++i) State[i] = 0x00UL;
+	
+	// Last bit of padding
+	State[16] = 0x8000000000000000UL;
+	
+	keccakf1600_2(State);
+	
+	mem_fence(CLK_GLOBAL_MEM_FENCE);
 	
 	#pragma unroll
 	for(int i = 0; i < 25; ++i) states[i] = State[i];
 	
-	text = vload4(get_local_id(1) + 4, (uint *)(State));
+	text = vload4(get_local_id(1) + 4, (__global uint *)(states));
 	
 	#pragma unroll
-	for(int i = 0; i < 4; ++i) ((ulong *)ExpandedKey1)[i] = State[i];
+	for(int i = 0; i < 4; ++i) ((ulong *)ExpandedKey1)[i] = states[i];
 	
 	AESExpandKey256(ExpandedKey1);
 	

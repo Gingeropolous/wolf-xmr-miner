@@ -1,9 +1,9 @@
 CC		= gcc
 LD		= gcc
-OPT = -O0 -ggdb3
-CFLAGS 	= -D_POSIX_SOURCE -D_GNU_SOURCE $(OPT) -pthread -c -std=c11
+OPT 	= -O2 -s -I/opt/AMDAPP/SDK/include -I/home/wolf/miners/sgminer-builds/sgminer-win64/include -L/home/wolf/miners/sgminer-builds/sgminer-win64/lib -I/home/wolf/AMD_APP_SDK_3.0_Beta_Win64/include -L/home/wolf/AMD_APP_SDK_3.0_Beta_Win64/lib/x86_64 -D PTW32_STATIC_LIB
+CFLAGS 	= -D_POSIX_SOURCE -D_GNU_SOURCE $(OPT) -c -std=c11
 LDFLAGS	= -pthread $(OPT)
-LIBS	= -ljansson -lOpenCL -ldl
+LIBS	= -ljansson -lOpenCL -lpthread -ldl
 
 all:
 	$(CC) $(CFLAGS) crypto/aesb.c -o crypto/aesb.o

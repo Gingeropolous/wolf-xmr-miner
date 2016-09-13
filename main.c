@@ -21,6 +21,7 @@
 #else
 
 #include <winsock2.h>
+#undef __cpuid
 
 #endif
 

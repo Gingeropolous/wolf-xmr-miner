@@ -6,7 +6,9 @@
 
 #include <stdlib.h>
 #include <unistd.h>
+#ifdef __linux__
 #include <sys/mman.h>
+#endif
 #include "crypto/oaes_lib.h"
 #include "crypto/c_keccak.h"
 #include "crypto/c_groestl.h"

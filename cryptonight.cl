@@ -652,9 +652,12 @@ __kernel void cryptonight(__global ulong *input, __global uint4 *Scratchpad, __g
 
 #define VSWAP4(x)	((((x) >> 24) & 0xFFU) | (((x) >> 8) & 0xFF00U) | (((x) << 8) & 0xFF0000U) | (((x) << 24) & 0xFF000000U))
 
-__kernel void Skein(__global ulong *states, __global uint *BranchBuf, __global uint *output, uint Target)
+__kernel void Skein(__global ulong *states, __global uint *BranchBuf, __global uint *output, uint Target, ulong Threads)
 {
 	const ulong idx = get_global_id(0) - get_global_offset(0);
+	
+	if(idx >= Threads) return;
+	
 	states += 25 * BranchBuf[idx];
 	
 	// skein
@@ -703,9 +706,12 @@ __kernel void Skein(__global ulong *states, __global uint *BranchBuf, __global u
 
 #define SWAP8(x)	as_ulong(as_uchar8(x).s76543210)
 
-__kernel void JH(__global ulong *states, __global uint *BranchBuf, __global uint *output, uint Target)
+__kernel void JH(__global ulong *states, __global uint *BranchBuf, __global uint *output, uint Target, ulong Threads)
 {
 	const uint idx = get_global_id(0) - get_global_offset(0);
+	
+	if(idx >= Threads) return;
+	
 	states += 25 * BranchBuf[idx];
 	
 	sph_u64 h0h = 0xEBD3202C41A398EBUL, h0l = 0xC145B29C7BBECD92UL, h1h = 0xFAC7D4609151931CUL, h1l = 0x038A507ED6820026UL, h2h = 0x45B92677269E23A4UL, h2l = 0x77941AD4481AFBE0UL, h3h = 0x7A176B0226ABB5CDUL, h3l = 0xA82FFF0F4224F056UL;
@@ -764,9 +770,12 @@ __kernel void JH(__global ulong *states, __global uint *BranchBuf, __global uint
 
 #define SWAP4(x)	as_uint(as_uchar4(x).s3210)
 
-__kernel void Blake(__global ulong *states, __global uint *BranchBuf, __global uint *output, uint Target)
+__kernel void Blake(__global ulong *states, __global uint *BranchBuf, __global uint *output, uint Target, ulong Threads)
 {
 	const uint idx = get_global_id(0) - get_global_offset(0);
+	
+	if(idx >= Threads) return;
+	
 	states += 25 * BranchBuf[idx];
 	
 	unsigned int m[16];
@@ -827,9 +836,12 @@ __kernel void Blake(__global ulong *states, __global uint *BranchBuf, __global u
 	if(h[7] <= Target) output[atomic_inc(output + 0xFF)] = BranchBuf[idx] + get_global_offset(0);
 }
 
-__kernel void Groestl(__global ulong *states, __global uint *BranchBuf, __global uint *output, uint Target)
-{	
+__kernel void Groestl(__global ulong *states, __global uint *BranchBuf, __global uint *output, uint Target, ulong Threads)
+{
 	const uint idx = get_global_id(0) - get_global_offset(0);
+	
+	if(idx >= Threads) return;
+	
 	states += 25 * BranchBuf[idx];
 	
 	ulong State[8];

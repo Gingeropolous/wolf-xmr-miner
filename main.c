@@ -526,7 +526,17 @@ int32_t RunXMRTest(AlgoContext *HashData, void *HashOutput)
 	{
 		if(BranchNonces[i])
 		{
-			//retval = clEnqueueNDRangeKernel(*HashData->CommandQueues, HashData->Kernels[i + 1], 1, &HashData->Nonce, BranchNonces + i, &LocalThreads, 0, NULL, NULL);
+			// Threads
+			retval = clSetKernelArg(HashData->Kernels[i + 3], 4, sizeof(cl_ulong), BranchNonces + i);
+			
+			BranchNonces[i] += BranchNonces[i] + (LocalThreads - (BranchNonces[i] & (LocalThreads - 1)));
+			
+			if(retval != CL_SUCCESS)
+			{
+				Log(LOG_CRITICAL, "Error %d when calling clSetKernelArg for kernel %d, argument %d.", retval, i + 3, 4);
+				return(ERR_OCL_API);
+			}
+			
 			retval = clEnqueueNDRangeKernel(*HashData->CommandQueues, HashData->Kernels[i + 3], 1, &HashData->Nonce, BranchNonces + i, &LocalThreads, 0, NULL, NULL);
 			
 			if(retval != CL_SUCCESS)

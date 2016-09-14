@@ -802,6 +802,8 @@ int32_t SetupXMRTest(AlgoContext *HashData, OCLPlatform *OCL, uint32_t DeviceIdx
 
 static void RestartMiners(PoolInfo *Pool)
 {
+	ConnectToPool(Pool->StrippedURL, Pool->Port);
+	
 	for(int i = 0; i < Pool->MinerThreadCount; ++i)
 		atomic_store(RestartMining + i, true);
 }

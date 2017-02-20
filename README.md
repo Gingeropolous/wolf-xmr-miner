@@ -1,5 +1,7 @@
 # wolf-xmr-miner
 
+###NOTE: Wolf's XMR Miner is no longer maintained - please use https://github.com/genesismining/sgminer-gm.
+
 Wolf's OpenCL XMR Miner for AMD GPUs
 
 If you get an error about `clCreateBuffer`, lower your `rawintensity`. See the example config [xmr.conf](xmr.conf) for details.

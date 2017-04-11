@@ -1117,7 +1117,7 @@ reauth:
 		
 		// receive
 		ret = recv(poolsocket, rawresponse + PartialMessageOffset, STRATUM_MAX_MESSAGE_LEN_BYTES - PartialMessageOffset, 0);
-		if (ret < 0)
+		if (ret <= 0)
 			goto retry2;
 		
 		rawresponse[ret] = 0x00;

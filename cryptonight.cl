@@ -1,4 +1,9 @@
+#ifdef cl_amd_media_ops2
 #pragma OPENCL EXTENSION cl_amd_media_ops2 : enable
+#else
+#define amd_bitalign(src0, src1, src2)	((((((long)src0) << 32) | (long)src1) >> (src2 & 31)))
+#define amd_bfe(src0, offset, width)	((src0 << (32 - (offset) - width)) >> (32 - width))
+#endif
 
 
 #include "wolf-aes.cl"
@@ -312,8 +317,6 @@ void CNKeccak(ulong *output, ulong *input)
 }
 
 static const __constant uchar rcon[8] = { 0x8d, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40 };
-
-#pragma OPENCL EXTENSION cl_amd_media_ops2 : enable
 
 #define BYTE(x, y)	(amd_bfe((x), (y) << 3U, 8U))
 

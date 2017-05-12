@@ -1337,7 +1337,7 @@ void *MinerThreadProc(void *Info)
 	
 	// Generate work for first run.
 	MyJobIdx = JobIdx;
-	MyJob = CurrentJob;
+	MyJob = (JobInfo *)CurrentJob;
 	memcpy(TmpWork, MyJob->XMRBlob, sizeof(MyJob->XMRBlob));
 	Target = MyJob->XMRTarget;
 	
@@ -1366,7 +1366,7 @@ void *MinerThreadProc(void *Info)
 		{
 			Log(LOG_DEBUG, "%s: Detected new job, regenerating work.", ThrID);
 			MyJobIdx = JobIdx;
-			MyJob = CurrentJob;
+			MyJob = (JobInfo *)CurrentJob;
 			memcpy(TmpWork, MyJob->XMRBlob, sizeof(MyJob->XMRBlob));
 			Target = MyJob->XMRTarget;
 			

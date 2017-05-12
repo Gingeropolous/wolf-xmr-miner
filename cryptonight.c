@@ -380,7 +380,7 @@ void cryptonight_hash_aesni(void *restrict output, const void *restrict input, s
 	  a[0] += hi;
 	  a[1] += lo;
 	}
-	uint64_t *dst = &ctx->long_state[c[0] & 0x1FFFF0];
+	uint64_t *dst = (uint64_t *)&ctx->long_state[c[0] & 0x1FFFF0];
 	dst[0] = a[0];
 	dst[1] = a[1];
 
@@ -423,7 +423,7 @@ void cryptonight_hash_aesni(void *restrict output, const void *restrict input, s
 	}
 
     memcpy(ctx->state.init, ctx->text, INIT_SIZE_BYTE);
-	keccakf(&ctx->state.hs, 24);
+	keccakf(ctx->state.hs.w, 24);
     extra_hashes[ctx->state.hs.b[0] & 3](&ctx->state, 200, output);
 }
 

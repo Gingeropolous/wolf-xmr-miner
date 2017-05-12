@@ -233,7 +233,7 @@ void *PoolBroadcastThreadProc(void *Info)
 			
 			if (!CurShare->Gothash) {
 				((uint32_t *)(CurShare->Job->XMRBlob + 39))[0] = CurShare->Nonce;
-				cryptonight_hash_ctx(HashResult, CurShare->Job->XMRBlob, c_ctx);
+				cryptonight_hash_ctx(HashResult, CurShare->Job->XMRBlob, CurShare->Job->XMRBlobLen, c_ctx);
 				BinaryToASCIIHex(ASCIIResult, HashResult, 32);
 			} else {
 				BinaryToASCIIHex(ASCIIResult, CurShare->Blob, 32);
@@ -270,7 +270,7 @@ int32_t XMRSetKernelArgs(AlgoContext *HashData, void *HashInput, uint32_t Target
 	
 	if(!HashData || !HashInput) return(ERR_STUPID_PARAMS);
 	
-	retval = clEnqueueWriteBuffer(*HashData->CommandQueues, HashData->InputBuffer, CL_TRUE, 0, 76, HashInput, 0, NULL, NULL);
+	retval = clEnqueueWriteBuffer(*HashData->CommandQueues, HashData->InputBuffer, CL_TRUE, 0, HashData->InputLen, HashInput, 0, NULL, NULL);
 	
 	if(retval != CL_SUCCESS)
 	{
@@ -278,143 +278,61 @@ int32_t XMRSetKernelArgs(AlgoContext *HashData, void *HashInput, uint32_t Target
 		return(ERR_OCL_API);
 	}
 	
-	retval = clSetKernelArg(HashData->Kernels[0], 0, sizeof(cl_mem), &HashData->InputBuffer);
-	if(retval != CL_SUCCESS)
-	{
-		Log(LOG_CRITICAL, "Error %d when calling clSetKernelArg for kernel %d, argument %d.", retval, 0, 0);
-		return(ERR_OCL_API);
-	}
-	
+#define CL_SET_ARG(k, n, s, v) do { \
+	retval = clSetKernelArg(HashData->Kernels[k], n, s, v); \
+	if(retval != CL_SUCCESS) { \
+		Log(LOG_CRITICAL, "Error %d when calling clSetKernelArg for kernel %d argument %d.", retval, k, n); \
+		return(ERR_OCL_API); \
+	} } while(0);
+
+	CL_SET_ARG(0, 0, sizeof(cl_mem), &HashData->InputBuffer);
+	CL_SET_ARG(0, 1, sizeof(cl_int), &HashData->InputLen);
+
 	// Scratchpads
-	retval = clSetKernelArg(HashData->Kernels[0], 1, sizeof(cl_mem), HashData->ExtraBuffers + 0);
-	
-	if(retval != CL_SUCCESS)
-	{
-		Log(LOG_CRITICAL, "Error %d when calling clSetKernelArg for kernel %d, argument %d.", retval, 0, 1);
-		return(ERR_OCL_API);
-	}
+	CL_SET_ARG(0, 2, sizeof(cl_mem), HashData->ExtraBuffers + 0);
 	
 	// States
-	retval = clSetKernelArg(HashData->Kernels[0], 2, sizeof(cl_mem), HashData->ExtraBuffers + 1);
-	
-	if(retval != CL_SUCCESS)
-	{
-		Log(LOG_CRITICAL, "Error %d when calling clSetKernelArg for kernel %d, argument %d.", retval, 0, 2);
-		return(ERR_OCL_API);
-	}
+	CL_SET_ARG(0, 3, sizeof(cl_mem), HashData->ExtraBuffers + 1);
 	
 	// CN2 Kernel
-	
 	// Scratchpads
-	retval = clSetKernelArg(HashData->Kernels[1], 0, sizeof(cl_mem), HashData->ExtraBuffers + 0);
-	
-	if(retval != CL_SUCCESS)
-	{
-		Log(LOG_CRITICAL, "Error %d when calling clSetKernelArg for kernel %d, argument %d.", retval, 1, 0);
-		return(ERR_OCL_API);
-	}
+	CL_SET_ARG(1, 0, sizeof(cl_mem), HashData->ExtraBuffers + 0);
 	
 	// States
-	retval = clSetKernelArg(HashData->Kernels[1], 1, sizeof(cl_mem), HashData->ExtraBuffers + 1);
-	
-	if(retval != CL_SUCCESS)
-	{
-		Log(LOG_CRITICAL, "Error %d when calling clSetKernelArg for kernel %d, argument %d.", retval, 1, 1);
-		return(ERR_OCL_API);
-	}
+	CL_SET_ARG(1, 1, sizeof(cl_mem), HashData->ExtraBuffers + 1);
 	
 	// CN3 Kernel
 	// Scratchpads
-	retval = clSetKernelArg(HashData->Kernels[2], 0, sizeof(cl_mem), HashData->ExtraBuffers + 0);
-	
-	if(retval != CL_SUCCESS)
-	{
-		Log(LOG_CRITICAL, "Error %d when calling clSetKernelArg for kernel %d, argument %d.", retval, 2, 0);
-		return(ERR_OCL_API);
-	}
+	CL_SET_ARG(2, 0, sizeof(cl_mem), HashData->ExtraBuffers + 0);
 	
 	// States
-	retval = clSetKernelArg(HashData->Kernels[2], 1, sizeof(cl_mem), HashData->ExtraBuffers + 1);
-	
-	if(retval != CL_SUCCESS)
-	{
-		Log(LOG_CRITICAL, "Error %d when calling clSetKernelArg for kernel %d, argument %d.", retval, 2, 1);
-		return(ERR_OCL_API);
-	}
+	CL_SET_ARG(2, 1, sizeof(cl_mem), HashData->ExtraBuffers + 1);
 	
 	// Branch 0
-	retval = clSetKernelArg(HashData->Kernels[2], 2, sizeof(cl_mem), HashData->ExtraBuffers + 2);
-	
-	if(retval != CL_SUCCESS)
-	{
-		Log(LOG_CRITICAL, "Error %d when calling clSetKernelArg for kernel %d, argument %d.", retval, 2, 2);
-		return(ERR_OCL_API);
-	}
+	CL_SET_ARG(2, 2, sizeof(cl_mem), HashData->ExtraBuffers + 2);
 	
 	// Branch 1
-	retval = clSetKernelArg(HashData->Kernels[2], 3, sizeof(cl_mem), HashData->ExtraBuffers + 3);
-	
-	if(retval != CL_SUCCESS)
-	{
-		Log(LOG_CRITICAL, "Error %d when calling clSetKernelArg for kernel %d, argument %d.", retval, 2, 3);
-		return(ERR_OCL_API);
-	}
+	CL_SET_ARG(2, 3, sizeof(cl_mem), HashData->ExtraBuffers + 3);
 	
 	// Branch 2
-	retval = clSetKernelArg(HashData->Kernels[2], 4, sizeof(cl_mem), HashData->ExtraBuffers + 4);
-	
-	if(retval != CL_SUCCESS)
-	{
-		Log(LOG_CRITICAL, "Error %d when calling clSetKernelArg for kernel %d, argument %d.", retval, 2, 4);
-		return(ERR_OCL_API);
-	}
+	CL_SET_ARG(2, 4, sizeof(cl_mem), HashData->ExtraBuffers + 4);
 	
 	// Branch 3
-	retval = clSetKernelArg(HashData->Kernels[2], 5, sizeof(cl_mem), HashData->ExtraBuffers + 5);
-	
-	if(retval != CL_SUCCESS)
-	{
-		Log(LOG_CRITICAL, "Error %d when calling clSetKernelArg for kernel %d, argument %d.", retval, 2, 5);
-		return(ERR_OCL_API);
-	}
+	CL_SET_ARG(2, 5, sizeof(cl_mem), HashData->ExtraBuffers + 5);
 	
 	for(int i = 0; i < 4; ++i)
 	{
 		// States
-		retval = clSetKernelArg(HashData->Kernels[i + 3], 0, sizeof(cl_mem), HashData->ExtraBuffers + 1);
-		
-		if(retval != CL_SUCCESS)
-		{
-			Log(LOG_CRITICAL, "Error %d when calling clSetKernelArg for kernel %d, argument %d.", retval, i + 3, 0);
-			return(ERR_OCL_API);
-		}
+		CL_SET_ARG(i+3, 0, sizeof(cl_mem), HashData->ExtraBuffers + 1);
 		
 		// Nonce buffer
-		retval = clSetKernelArg(HashData->Kernels[i + 3], 1, sizeof(cl_mem), HashData->ExtraBuffers + (i + 2));
-		
-		if(retval != CL_SUCCESS)
-		{
-			Log(LOG_CRITICAL, "Error %d when calling clSetKernelArg for kernel %d, argument %d.", retval, i + 3, 1);
-			return(ERR_OCL_API);
-		}
+		CL_SET_ARG(i+3, 1, sizeof(cl_mem), HashData->ExtraBuffers + (i + 2));
 		
 		// Output
-		retval = clSetKernelArg(HashData->Kernels[i + 3], 2, sizeof(cl_mem), &HashData->OutputBuffer);
-		
-		if(retval != CL_SUCCESS)
-		{
-			Log(LOG_CRITICAL, "Error %d when calling clSetKernelArg for kernel %d, argument %d.", retval, i + 3, 2);
-			return(ERR_OCL_API);
-		}
-		
+		CL_SET_ARG(i+3, 2, sizeof(cl_mem), &HashData->OutputBuffer);
+
 		// Target
-		retval = clSetKernelArg(HashData->Kernels[i + 3], 3, sizeof(cl_uint), &Target);
-		
-		if(retval != CL_SUCCESS)
-		{
-			Log(LOG_CRITICAL, "Error %d when calling clSetKernelArg for kernel %d, argument %d.", retval, i + 3, 3);
-			return(ERR_OCL_API);
-		}
+		CL_SET_ARG(i+3, 3, sizeof(cl_uint), &Target);
 	}
 	
 	return(ERR_SUCCESS);
@@ -957,7 +875,8 @@ retry:
 				const char *tmpl = json_string_value(json_object_get(result, "blocktemplate_blob"));
 				const char *hasher = json_string_value(json_object_get(result, "blockhashing_blob"));
 				uint64_t diff = json_integer_value(json_object_get(result, "difficulty"));
-				ASCIIHexToBinary(NextJob->XMRBlob, hasher, strlen(hasher));
+				NextJob->XMRBlobLen = strlen(hasher) / 2;
+				ASCIIHexToBinary(NextJob->XMRBlob, hasher, NextJob->XMRBlobLen * 2);
 				Log(LOG_NOTIFY, "New block at diff %lu", diff);
 				diff = 0xffffffffffffffffUL / diff;
 				NextJob->XMRTarget = diff >> 32;
@@ -1235,7 +1154,8 @@ reauth:
 					}
 					
 					const char *val = json_string_value(blob);
-					ASCIIHexToBinary(NextJob->XMRBlob, val, strlen(val));
+					NextJob->XMRBlobLen = strlen(val) / 2;
+					ASCIIHexToBinary(NextJob->XMRBlob, val, NextJob->XMRBlobLen * 2);
 					strcpy(NextJob->ID, json_string_value(jid));
 					NextJob->XMRTarget = __builtin_bswap32(strtoul(json_string_value(target), NULL, 16));
 					CurrentJob = NextJob;
@@ -1281,7 +1201,8 @@ reauth:
 					}
 					
 					const char *val = json_string_value(blob);
-					ASCIIHexToBinary(NextJob->XMRBlob, val, strlen(val));
+					NextJob->XMRBlobLen = strlen(val) / 2;
+					ASCIIHexToBinary(NextJob->XMRBlob, val, NextJob->XMRBlobLen * 2);
 					strcpy(NextJob->ID, json_string_value(jid));
 					NextJob->XMRTarget = __builtin_bswap32(strtoul(json_string_value(target), NULL, 16));
 					CurrentJob = NextJob;
@@ -1324,7 +1245,8 @@ void *MinerThreadProc(void *Info)
 	int MyJobIdx;
 	JobInfo *MyJob;
 	char ThrID[128];
-	uint32_t Target, TmpWork[20];
+	uint32_t Target, TmpWork[32];
+	uint32_t BlobLen;
 	MinerThreadInfo *MTInfo = (MinerThreadInfo *)Info;
 	uint32_t StartNonce = (0xFFFFFFFFU / MTInfo->TotalMinerThreads) * MTInfo->ThreadID;
 	uint32_t MaxNonce = StartNonce + (0xFFFFFFFFU / MTInfo->TotalMinerThreads);
@@ -1336,11 +1258,13 @@ void *MinerThreadProc(void *Info)
 	// Generate work for first run.
 	MyJobIdx = JobIdx;
 	MyJob = (JobInfo *)CurrentJob;
-	memcpy(TmpWork, MyJob->XMRBlob, sizeof(MyJob->XMRBlob));
+	BlobLen = MyJob->XMRBlobLen;
+	memcpy(TmpWork, MyJob->XMRBlob, BlobLen);
 	Target = MyJob->XMRTarget;
 	
 	if (MTInfo->PlatformContext) {
 		MTInfo->AlgoCtx.Nonce = StartNonce;
+		MTInfo->AlgoCtx.InputLen = BlobLen;
 		err = XMRSetKernelArgs(&MTInfo->AlgoCtx, TmpWork, Target);
 		if(err) return(NULL);
 		sprintf(ThrID, "Thread %d, GPU ID %d, GPU Type: %s",
@@ -1365,11 +1289,13 @@ void *MinerThreadProc(void *Info)
 			Log(LOG_DEBUG, "%s: Detected new job, regenerating work.", ThrID);
 			MyJobIdx = JobIdx;
 			MyJob = (JobInfo *)CurrentJob;
-			memcpy(TmpWork, MyJob->XMRBlob, sizeof(MyJob->XMRBlob));
+			BlobLen = MyJob->XMRBlobLen;
+			memcpy(TmpWork, MyJob->XMRBlob, BlobLen);
 			Target = MyJob->XMRTarget;
 			
 			if (MTInfo->PlatformContext) {
 				MTInfo->AlgoCtx.Nonce = StartNonce;
+				MTInfo->AlgoCtx.InputLen = BlobLen;
 				err = XMRSetKernelArgs(&MTInfo->AlgoCtx, TmpWork, Target);
 				if(err) return(NULL);
 			} else {
@@ -1420,7 +1346,7 @@ void *MinerThreadProc(void *Info)
 again:
 			do {
 				*nonceptr = ++n;
-				cryptonight_hash_ctx(hash, TmpWork, ctx);
+				cryptonight_hash_ctx(hash, TmpWork, BlobLen, ctx);
 				if (hash[7] < Target) {
 					found = 1;
 				} else if (atomic_load(RestartMining + MTInfo->ThreadID)) {

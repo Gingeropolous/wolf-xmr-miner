@@ -174,9 +174,10 @@ int keccak(const uint8_t *in, int inlen, uint8_t *md, int mdlen)
     
 	uint64_t st[25];
 	
-	memcpy(st, in, 76);
-	memset(&st[10], 0x00, 120);
-	st[9] = (st[9] & 0x00000000FFFFFFFFULL) | 0x0000000100000000ULL;
+	memcpy(st, in, inlen);
+	((uint8_t *)st)[inlen] = 0x01;
+	memset(((uint8_t *)st) + inlen + 1, 0x00, 128 - inlen - 1);
+	for (int i=16; i<25; ++i) st[i] = 0;
 	st[16] = 0x8000000000000000ULL;
 	
 	keccakf(st, 24);

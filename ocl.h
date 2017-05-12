@@ -69,6 +69,7 @@ typedef struct _AlgoContext
 	size_t *GPUIdxs;
 	void *ExtraData;
 	size_t Nonce;
+	uint32_t InputLen;
 } AlgoContext;
 
 int32_t InitOpenCLPlatformContext(OCLPlatform *OCL, uint32_t RequestedPlatformIdx, uint32_t NumDevicesRequested, uint32_t *RequestedDeviceIdxs);

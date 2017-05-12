@@ -143,9 +143,9 @@ struct cryptonight_aesni_ctx {
     oaes_ctx* aes_ctx;
 };
 
-void cryptonight_hash_dumb(void* output, const void* input, struct cryptonight_ctx* ctx) {
+void cryptonight_hash_dumb(void* output, const void* input, const uint32_t inlen, struct cryptonight_ctx* ctx) {
 	size_t i, j;
-	keccak1600(input, 76, (uint8_t *)&ctx->state.hs);
+	keccak1600(input, inlen, (uint8_t *)&ctx->state.hs);
 	if (!ctx->aes_ctx)
 		ctx->aes_ctx = (oaes_ctx*) oaes_alloc();
 	memcpy(ctx->text, ctx->state.init, INIT_SIZE_BYTE);
@@ -295,13 +295,13 @@ static inline void ExpandAESKey256(char *keybuf)
 	keys[14] = tmp1;
 }
 
-void cryptonight_hash_aesni(void *restrict output, const void *restrict input, struct cryptonight_ctx *restrict ct0)
+void cryptonight_hash_aesni(void *restrict output, const void *restrict input, const uint32_t inlen, struct cryptonight_ctx *restrict ct0)
 {
     struct cryptonight_aesni_ctx *ctx = (struct cryptonight_aesni_ctx *)ct0;
     uint8_t ExpandedKey[256];
     size_t i, j;
 
-    keccak1600(input, 76, (uint8_t *)&ctx->state.hs);
+    keccak1600(input, inlen, (uint8_t *)&ctx->state.hs);
     memcpy(ctx->text, ctx->state.init, INIT_SIZE_BYTE);
     memcpy(ExpandedKey, ctx->state.hs.b, AES_KEY_SIZE);
     ExpandAESKey256(ExpandedKey);

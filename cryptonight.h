@@ -3,7 +3,7 @@
 
 struct cryptonight_ctx;
 
-typedef void (cryptonight_func)(void *output, const void *input, struct cryptonight_ctx *ctx);
+typedef void (cryptonight_func)(void *output, const void *input, const uint32_t inlen, struct cryptonight_ctx *ctx);
 cryptonight_func cryptonight_hash_dumb;
 cryptonight_func cryptonight_hash_aesni;
 

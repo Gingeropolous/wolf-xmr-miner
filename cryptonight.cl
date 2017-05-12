@@ -294,6 +294,7 @@ void keccakf1600_2(ulong *st)
     }
 }
 
+#if 0
 void CNKeccak(ulong *output, ulong *input)
 {
 	ulong st[25];
@@ -315,6 +316,7 @@ void CNKeccak(ulong *output, ulong *input)
 	
 	for(int i = 0; i < 25; ++i) output[i] = st[i];
 }
+#endif
 
 static const __constant uchar rcon[8] = { 0x8d, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40 };
 
@@ -340,7 +342,7 @@ void AESExpandKey256(uint *keybuf)
 #define IDX(x)	((x) * (get_global_size(0)))
 
 __attribute__((reqd_work_group_size(WORKSIZE, 8, 1)))
-__kernel void cn0(__global ulong *input, __global uint4 *Scratchpad, __global ulong *states)
+__kernel void cn0(__global ulong *input, uint InputLen, __global uint4 *Scratchpad, __global ulong *states)
 {
 	ulong State[25];
 	uint ExpandedKey1[256];
@@ -367,9 +369,15 @@ __kernel void cn0(__global ulong *input, __global uint4 *Scratchpad, __global ul
 	((uint *)State)[9] |= ((get_global_id(0)) & 0xFF) << 24;
 	((uint *)State)[10] &= 0xFF000000U;
 	((uint *)State)[10] |= ((get_global_id(0) >> 8));
-	State[9] = (input[9] & 0x00000000FFFFFFFFUL) | 0x0000000100000000UL;
+	State[9] = (input[9] & 0x00000000FFFFFFFFUL);
 	
-	for(int i = 10; i < 25; ++i) State[i] = 0x00UL;
+	for(int i = 76; i < InputLen; ++i) ((uchar *)State)[i] = ((__global uchar *)input)[i];
+
+	((uchar *)State)[InputLen] = 0x01;
+
+	for(int i = InputLen + 1; i < 128; ++i) ((uchar *)State)[i] = 0x00;
+
+	for(int i = 16; i < 25; ++i) State[i] = 0x00UL;
 	
 	// Last bit of padding
 	State[16] = 0x8000000000000000UL;
@@ -535,7 +543,7 @@ __kernel void cn2(__global uint4 *Scratchpad, __global ulong *states, __global u
 	mem_fence(CLK_GLOBAL_MEM_FENCE);
 }
 
-/*
+#if 0
 __kernel void cryptonight(__global ulong *input, __global uint4 *Scratchpad, __global ulong *states, __global uint *Branch0, __global uint *Branch1, __global uint *Branch2, __global uint *Branch3, ulong ThreadCount)
 {
 	uchar State[200];
@@ -658,7 +666,7 @@ __kernel void cryptonight(__global ulong *input, __global uint4 *Scratchpad, __g
 			break;
 	}	
 }
-*/
+#endif
 
 #define VSWAP8(x)	(((x) >> 56) | (((x) >> 40) & 0x000000000000FF00UL) | (((x) >> 24) & 0x0000000000FF0000UL) \
           | (((x) >>  8) & 0x00000000FF000000UL) | (((x) <<  8) & 0x000000FF00000000UL) \

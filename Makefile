@@ -1,20 +1,29 @@
-CC		= gcc
-LD		= gcc
-OPT 	= -O2 -s -I/home/wolf/miners/sgminer-builds/sgminer-lin64/include/ -L/home/wolf/miners/sgminer-builds/sgminer-lin64/lib
-AES	= -maes
-CFLAGS 	= -D_POSIX_SOURCE -D_GNU_SOURCE $(OPT) -c -std=c11
-LDFLAGS	= -DPTW32_STATIC_LIB $(OPT)
-LIBS	= -ljansson -lOpenCL -lpthread -ldl
+CC	= gcc
+LD	= $(CC)
+OPT 	= -O2 -s
+IPATH	= -I/home/wolf/miners/sgminer-builds/sgminer-lin64/include/
+LPATH	= -L/home/wolf/miners/sgminer-builds/sgminer-lin64/lib
+CFLAGS 	= -D_POSIX_SOURCE -D_GNU_SOURCE $(OPT) -std=c11 -pthread $(IPATH)
+LDFLAGS	= -DPTW32_STATIC_LIB $(LPATH)
+LIBS	= -ljansson -lOpenCL -pthread -ldl
 
-OBJS = crypto/aesb.o crypto/aesb-x86-impl.o crypto/c_blake256.o \
+PLAT	= X86
+OBJX86	= crypto/aesb.o crypto/aesb-x86-impl.o crypto/oaes_lib.o
+AESX86	= -maes
+OBJARM	=
+AESARM	=
+OBJPLAT = $(OBJ$(PLAT))
+AES	= $(AES$(PLAT))
+
+OBJS	= $(OBJPLAT) crypto/c_blake256.o \
 	crypto/c_groestl.o crypto/c_keccak.o crypto/c_jh.o crypto/c_skein.o \
-	crypto/oaes_lib.o cryptonight.o log.o net.o minerutils.o gpu.o main.o
+	cryptonight.o log.o net.o minerutils.o gpu.o main.o
 
 all: $(OBJS)
-	$(LD) -o miner $(OBJS) $(LIBS)
+	$(LD) $(LDFLAGS) -o miner $(OBJS) $(LIBS)
 
 cryptonight.o:	cryptonight.c
-	$(CC) $(CFLAGS) $(AES)	$? -o $@
+	$(CC) $(CFLAGS) $(AES)  -c -o $@ $?
 
 clean:
 	rm -f *.o crypto/*.o miner

@@ -6,7 +6,9 @@
 #include <stdbool.h>
 #include <jansson.h>
 #include <stdatomic.h>
+#ifdef __x86_64__
 #include <cpuid.h>
+#endif
 
 #ifdef __linux__
 
@@ -1320,7 +1322,7 @@ void *MinerThreadProc(void *Info)
 				err = RunXMRTest(&MTInfo->AlgoCtx, Results);
 				if(err) return(NULL);
 				
-				if(atomic_load(RestartMining + MTInfo->ThreadID)) break;
+				if(atomic_load(RestartMining + MTInfo->ThreadID) || ExitFlag) break;
 
 				for(int i = 0; i < Results[0xFF]; ++i)
 				{
@@ -1345,6 +1347,7 @@ void *MinerThreadProc(void *Info)
 			int found = 0;
 again:
 			do {
+				if (ExitFlag) break;
 				*nonceptr = ++n;
 				cryptonight_hash_ctx(hash, TmpWork, BlobLen, ctx);
 				if (hash[7] < Target) {
@@ -1694,6 +1697,9 @@ int main(int argc, char **argv)
 	
 	if(ParseConfigurationFile(argv[1], &Settings)) return(0);
 	
+#ifdef __aarch64__
+	cryptonight_hash_ctx = cryptonight_hash_aesni;
+#else
 	if (__get_cpuid_max(0, &tmp1) >= 1) {
 		__get_cpuid(1, &tmp1, &tmp2, &tmp3, &tmp4);
 		if (tmp3 & 0x2000000)
@@ -1703,6 +1709,7 @@ int main(int argc, char **argv)
 		cryptonight_hash_ctx = cryptonight_hash_aesni;
 	else
 		cryptonight_hash_ctx = cryptonight_hash_dumb;
+#endif
 
 	MThrInfo = (MinerThreadInfo *)malloc(sizeof(MinerThreadInfo) * Settings.TotalThreads);
 	MinerWorker = (pthread_t *)malloc(sizeof(pthread_t) * Settings.TotalThreads);
@@ -1982,7 +1989,9 @@ int main(int argc, char **argv)
 	//pthread_cancel(Stratum);
 	//pthread_cancel(ADLThread);
 	
+#ifndef __ANDROID__
 	for(int i = 0; i < Settings.TotalThreads; ++i) pthread_cancel(MinerWorker[i]);
+#endif
 	
 	if (numGPUs)
 		ReleaseOpenCLPlatformContext(&PlatformContext);

@@ -1,8 +1,10 @@
 #ifdef cl_amd_media_ops2
 #pragma OPENCL EXTENSION cl_amd_media_ops2 : enable
+#define STATIC	static
 #else
 #define amd_bitalign(src0, src1, src2)	((((((long)src0) << 32) | (long)src1) >> (src2 & 31)))
 #define amd_bfe(src0, offset, width)	((src0 << (32 - (offset) - width)) >> (32 - width))
+#define STATIC
 #endif
 
 
@@ -14,7 +16,7 @@
 
 
 
-static const __constant ulong keccakf_rndc[24] = 
+STATIC const __constant ulong keccakf_rndc[24] = 
 {
     0x0000000000000001, 0x0000000000008082, 0x800000000000808a,
     0x8000000080008000, 0x000000000000808b, 0x0000000080000001,
@@ -26,7 +28,7 @@ static const __constant ulong keccakf_rndc[24] =
     0x8000000000008080, 0x0000000080000001, 0x8000000080008008
 };
 
-static const __constant uchar sbox[256] = 
+STATIC const __constant uchar sbox[256] = 
 {
 	0x63, 0x7C, 0x77, 0x7B, 0xF2, 0x6B, 0x6F, 0xC5, 0x30, 0x01, 0x67, 0x2B, 0xFE, 0xD7, 0xAB, 0x76,
 	0xCA, 0x82, 0xC9, 0x7D, 0xFA, 0x59, 0x47, 0xF0, 0xAD, 0xD4, 0xA2, 0xAF, 0x9C, 0xA4, 0x72, 0xC0,
@@ -95,13 +97,13 @@ void keccakf1600(ulong *s)
     }
 }
 
-static const __constant uint keccakf_rotc[24] = 
+STATIC const __constant uint keccakf_rotc[24] = 
 {
     1,  3,  6,  10, 15, 21, 28, 36, 45, 55, 2,  14, 
     27, 41, 56, 8,  25, 43, 62, 18, 39, 61, 20, 44
 };
 
-static const __constant uint keccakf_piln[24] = 
+STATIC const __constant uint keccakf_piln[24] = 
 {
     10, 7,  11, 17, 18, 3, 5,  16, 8,  21, 24, 4, 
     15, 23, 19, 13, 12, 2, 20, 14, 22, 9,  6,  1 
@@ -318,7 +320,7 @@ void CNKeccak(ulong *output, ulong *input)
 }
 #endif
 
-static const __constant uchar rcon[8] = { 0x8d, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40 };
+STATIC const __constant uchar rcon[8] = { 0x8d, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40 };
 
 #define BYTE(x, y)	(amd_bfe((x), (y) << 3U, 8U))
 

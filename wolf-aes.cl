@@ -3,7 +3,7 @@
 
 // AES table - the other three are generated on the fly
 
-static const __constant uint AES0_C[256] =
+STATIC const __constant uint AES0_C[256] =
 {
 	0xA56363C6U, 0x847C7CF8U, 0x997777EEU, 0x8D7B7BF6U,
 	0x0DF2F2FFU, 0xBD6B6BD6U, 0xB16F6FDEU, 0x54C5C591U,

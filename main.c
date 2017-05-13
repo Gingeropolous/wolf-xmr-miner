@@ -264,7 +264,7 @@ void *PoolBroadcastThreadProc(void *Info)
 	return(NULL);
 }
 
-int32_t XMRSetKernelArgs(AlgoContext *HashData, void *HashInput, uint32_t Target)
+int32_t XMRSetKernelArgs(AlgoContext *HashData, void *HashInput, uint64_t Target)
 {
 	cl_int retval;
 	cl_uint zero = 0;
@@ -334,7 +334,7 @@ int32_t XMRSetKernelArgs(AlgoContext *HashData, void *HashInput, uint32_t Target
 		CL_SET_ARG(i+3, 2, sizeof(cl_mem), &HashData->OutputBuffer);
 
 		// Target
-		CL_SET_ARG(i+3, 3, sizeof(cl_uint), &Target);
+		CL_SET_ARG(i+3, 3, sizeof(cl_ulong), &Target);
 	}
 	
 	return(ERR_SUCCESS);
@@ -881,7 +881,7 @@ retry:
 				ASCIIHexToBinary(NextJob->XMRBlob, hasher, NextJob->XMRBlobLen * 2);
 				Log(LOG_NOTIFY, "New block at diff %lu", diff);
 				diff = 0xffffffffffffffffUL / diff;
-				NextJob->XMRTarget = diff >> 32;
+				NextJob->XMRTarget = diff;
 				NextJob->blockblob = strdup(tmpl);
 				CurrentJob = NextJob;
 				JobIdx++;
@@ -1164,6 +1164,8 @@ reauth:
 					JobIdx++;
 					NextJob = &Jobs[JobIdx&1];
 					Log(LOG_NOTIFY, "New job at diff %g", (double)0xffffffff / CurrentJob->XMRTarget);
+					CurrentJob->XMRTarget <<= 32;
+					CurrentJob->XMRTarget |= 0xffffffff;
 				}
 				json_decref(result);
 			}
@@ -1215,6 +1217,8 @@ reauth:
 					RestartMiners(Pool);
 						
 					Log(LOG_NOTIFY, "New job at diff %g", (double)0xffffffff / CurrentJob->XMRTarget);
+					CurrentJob->XMRTarget <<= 32;
+					CurrentJob->XMRTarget |= 0xffffffff;
 				}	
 				else
 				{
@@ -1247,7 +1251,8 @@ void *MinerThreadProc(void *Info)
 	int MyJobIdx;
 	JobInfo *MyJob;
 	char ThrID[128];
-	uint32_t Target, TmpWork[32];
+	uint32_t TmpWork[32];
+	uint64_t Target;
 	uint32_t BlobLen;
 	MinerThreadInfo *MTInfo = (MinerThreadInfo *)Info;
 	uint32_t StartNonce = (0xFFFFFFFFU / MTInfo->TotalMinerThreads) * MTInfo->ThreadID;
@@ -1343,14 +1348,14 @@ void *MinerThreadProc(void *Info)
 		} else {
 			const uint32_t first_nonce = *nonceptr;
 			uint32_t n = first_nonce - 1;
-			uint32_t hash[32/4] __attribute__((aligned(32)));
+			uint64_t hash[32/8] __attribute__((aligned(64)));
 			int found = 0;
 again:
 			do {
 				if (ExitFlag) break;
 				*nonceptr = ++n;
 				cryptonight_hash_ctx(hash, TmpWork, BlobLen, ctx);
-				if (hash[7] < Target) {
+				if (hash[3] < Target) {
 					found = 1;
 				} else if (atomic_load(RestartMining + MTInfo->ThreadID)) {
 					found = 2;

@@ -6,7 +6,7 @@
 
 typedef struct _JobInfo
 {
-	uint32_t XMRTarget;
+	uint64_t XMRTarget;
 	uint8_t ID[32];
 	uint8_t XMRBlob[128];
 	uint32_t XMRBlobLen;

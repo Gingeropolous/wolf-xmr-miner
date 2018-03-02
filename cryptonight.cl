@@ -14,7 +14,11 @@
 #include "blake256.cl"
 #include "groestl256.cl"
 
-
+#define VARIANT1_2(p) \
+	do if (variant > 0) \
+	{ \
+		((uint2 *)&(p))[0] ^= tweak1_2; \
+	} while(0)
 
 STATIC const __constant ulong keccakf_rndc[24] = 
 {
@@ -414,7 +418,7 @@ __kernel void cn0(__global ulong *input, uint InputLen, __global uint4 *Scratchp
 }
 
 __attribute__((reqd_work_group_size(WORKSIZE, 1, 1)))
-__kernel void cn1(__global uint4 *Scratchpad, __global ulong *states)
+__kernel void cn1(__global uint4 *Scratchpad, __global ulong *states, int variant, __global ulong *input)
 {
 	ulong a[2], b[2];
 	__local uint AES0[256], AES1[256], AES2[256], AES3[256];
@@ -422,6 +426,16 @@ __kernel void cn1(__global uint4 *Scratchpad, __global ulong *states)
 	Scratchpad += ((get_global_id(0) - get_global_offset(0)));
 	states += (25 * (get_global_id(0) - get_global_offset(0)));
 	
+	uint2 tweak1_2;
+	if (variant > 0)
+	{
+		tweak1_2 = as_uint2(input[4]);
+		tweak1_2.s0 >>= 24;
+		tweak1_2.s0 |= tweak1_2.s1 << 8;
+		tweak1_2.s1 = get_global_id(0);
+		tweak1_2 ^= as_uint2(states[24]);
+	}
+
 	for(int i = get_local_id(0); i < 256; i += WORKSIZE)
 	{
 		const uint tmp = AES0_C[i];
@@ -448,16 +462,25 @@ __kernel void cn1(__global uint4 *Scratchpad, __global ulong *states)
 		((uint4 *)c)[0] = Scratchpad[IDX((a[0] & 0x1FFFF0) >> 4)];
 		((uint4 *)c)[0] = AES_Round(AES0, AES1, AES2, AES3, ((uint4 *)c)[0], ((uint4 *)a)[0]);
 		//b_x ^= ((uint4 *)c)[0];
-		
-		Scratchpad[IDX((a[0] & 0x1FFFF0) >> 4)] = b_x ^ ((uint4 *)c)[0];
+
+		b_x ^= ((uint4 *)c)[0];
+		if (variant > 0)
+		{
+			uint table = 0x75310U;
+			uint index = (((b_x.s2) >> 26) & 12) | ((b_x.s2 >> 23) & 2);
+			b_x.s2 ^= ((table >> index) & 0x30U) << 24;
+		}
+		Scratchpad[IDX((a[0] & 0x1FFFF0) >> 4)] = b_x;
 		
 		uint4 tmp;
 		tmp = Scratchpad[IDX((c[0] & 0x1FFFF0) >> 4)];
 		
 		a[1] += c[0] * as_ulong2(tmp).s0;
 		a[0] += mul_hi(c[0], as_ulong2(tmp).s0);
-		
+
+		VARIANT1_2(a[1]);
 		Scratchpad[IDX((c[0] & 0x1FFFF0) >> 4)] = ((uint4 *)a)[0];
+		VARIANT1_2(a[1]);
 		
 		((uint4 *)a)[0] ^= tmp;
 		
@@ -680,6 +703,7 @@ __kernel void Skein(__global ulong *states, __global uint *BranchBuf, __global u
 {
 	const ulong idx = get_global_id(0) - get_global_offset(0);
 	
+
 	if(idx >= Threads) return;
 	
 	states += 25 * BranchBuf[idx];

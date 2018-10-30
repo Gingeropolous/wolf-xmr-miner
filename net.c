@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 
 #else
 
@@ -97,5 +98,9 @@ int SetNonBlockingSocket(SOCKET sockfd)
 	
 	#endif
 	
+	{
+		int keepalive = 1;
+		setsockopt(sockfd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+	}
 	return(0);
 }

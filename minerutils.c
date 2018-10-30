@@ -68,6 +68,7 @@ size_t LoadTextFile(char **Output, char *Filename)
 	*Output = (char *)malloc(sizeof(char) * (len + 2));
 	len = fread(*Output, sizeof(char), len, kernel);
 	Output[0][len] = 0x00;		// NULL terminator
+	fclose(kernel);
 	
 	return(len);
 }
@@ -132,6 +133,18 @@ TIME_TYPE MinerGetCurTime(void)
 double SecondsElapsed(TIME_TYPE Start, TIME_TYPE End)
 {
 	return((double)(End - Start) / CLOCKS_PER_SEC);
+}
+
+#endif
+
+#ifdef __linux__
+
+void Sleep(uint32_t ms)
+{
+	struct timespec t;
+	t.tv_sec = ms / 1000;
+	t.tv_nsec = (ms % 1000) * 1000000;
+	nanosleep(&t, NULL);
 }
 
 #endif

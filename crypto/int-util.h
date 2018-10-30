@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/param.h>
+#include <endian.h>
 
 #if defined(_MSC_VER)
 #include <stdlib.h>
